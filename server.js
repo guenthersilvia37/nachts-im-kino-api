@@ -60,7 +60,7 @@ app.get("/api/showtimes", async (req, res) => {
         .status(500)
         .json({ error: "RAPIDAPI_KEY fehlt (Render Environment Variables)" });
     }
-
+ 
     const q = (req.query.q || "").toString().trim();
     if (!q) {
       return res
