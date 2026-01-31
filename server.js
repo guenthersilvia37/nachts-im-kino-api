@@ -37,11 +37,11 @@ async function geocode(query) {
 
 app.get("/api/showtimes", async (req, res) => {
   try {
-    const apiKey = process.env.IS_API_KEY;
-    const q = req.query.q;
+    const rapidKey = process.env.RAPIDAPI_KEY;
+    if (!rapidKey) return res.status(500).json({ error: "RAPIDAPI_KEY fehlt (Render Env Vars)" });
 
-    if (!apiKey) return res.status(500).json({ error: "API Key fehlt" });
-    if (!q) return res.status(400).json({ error: "Ort fehlt" });
+    const q = (req.query.q || "").toString().trim();
+    if (!q) return res.status(400).json({ error: "Parameter q fehlt (z. B. ?q=Berlin)" });
 
     const loc = await geocode(q);
     if (!loc) return res.status(404).json({ error: "Ort nicht gefunden" });
@@ -58,20 +58,22 @@ app.get("/api/showtimes", async (req, res) => {
       append: "movies,cinemas"
     });
 
-    const url = "https://api.internationalshowtimes.com/v4/showtimes?" + params;
+    const url = "https://international-showtimes.p.rapidapi.com/v4/showtimes?" + params.toString();
 
     const r = await fetch(url, {
       headers: {
-        "X-API-Key": apiKey,
+        "X-RapidAPI-Key": rapidKey,
+        "X-RapidAPI-Host": "international-showtimes.p.rapidapi.com",
         "Accept-Language": "de"
       }
     });
 
     const data = await r.json();
-    res.json(data);
+    if (!r.ok) return res.status(r.status).json({ error: "RapidAPI Fehler", details: data });
 
+    res.json(data);
   } catch (e) {
-    res.status(500).json({ error: String(e) });
+    res.status(500).json({ error: "Serverfehler", details: String(e?.message || e) });
   }
 });
 
