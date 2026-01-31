@@ -7,11 +7,6 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // --------------------
-// Basics
-// --------------------
-app.disable("x-powered-by");
-
-// --------------------
 // CORS
 // --------------------
 app.use((req, res, next) => {
@@ -30,6 +25,11 @@ app.get("/api/health", (req, res) => res.json({ ok: true }));
 // --------------------
 // Helpers
 // --------------------
+function toNumber(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 function pickCity(geoItem, fallback) {
   const a = geoItem?.address || {};
   return (
@@ -43,42 +43,29 @@ function pickCity(geoItem, fallback) {
   );
 }
 
-function toNumber(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
+// Blockliste (Erotik/Noise)
+const BLOCKED_WORDS = [
+  "erotik",
+  "sex",
+  "sextoy",
+  "adult",
+  "bordell",
+  "strip",
+  "sauna club",
+  "saunaclub",
+  "massage",
+  "escort",
+  "erdbeermund",
+  "lovehotel",
+  "swinger",
+];
 
-function normalizeCinema(p) {
-  return {
-    title: p?.title || p?.name || "Kino",
-    address: p?.address || p?.full_address || "",
-    rating: p?.rating ?? null,
-    reviews: p?.reviews ?? null,
-    place_id: p?.place_id || p?.data_id || null,
-    link: p?.link || p?.website || null,
-    gps_coordinates: p?.gps_coordinates || null,
-  };
-}
-
-// Erotik/Noise sicher entfernen + „echte Kinos“ erkennen
 function isCinemaPlace(p) {
-  const title = String(p?.title || "").toLowerCase();
+  const title = String(p?.title || p?.name || "").toLowerCase();
   const type = String(p?.type || "").toLowerCase();
   const category = String(p?.category || "").toLowerCase();
 
-  const blockedWords = [
-    "erotik",
-    "sex",
-    "sextoy",
-    "adult",
-    "bordell",
-    "strip",
-    "sauna club",
-    "massage",
-    "escort",
-    "erdbeermund",
-  ];
-  if (blockedWords.some((w) => title.includes(w))) return false;
+  if (BLOCKED_WORDS.some((w) => title.includes(w))) return false;
 
   const cinemaWords = [
     "kino",
@@ -96,7 +83,6 @@ function isCinemaPlace(p) {
   ];
 
   const looksLikeCinemaByText = cinemaWords.some((w) => title.includes(w));
-
   const looksLikeCinemaByCategory =
     category.includes("movie") ||
     category.includes("cinema") ||
@@ -106,41 +92,59 @@ function isCinemaPlace(p) {
   return looksLikeCinemaByText || looksLikeCinemaByCategory;
 }
 
-// fetch mit Timeout (damit Render nicht hängt)
-async function fetchJson(url, opts = {}, timeoutMs = 15000) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const r = await fetch(url, { ...opts, signal: ctrl.signal });
-    const data = await r.json().catch(() => null);
-    return { ok: r.ok, status: r.status, data };
-  } catch (e) {
-    return { ok: false, status: 599, data: { message: String(e?.message || e) } };
-  } finally {
-    clearTimeout(t);
+function normalizeCinema(p) {
+  return {
+    title: p?.title || p?.name || "Kino",
+    address: p?.address || p?.full_address || "",
+    rating: p?.rating ?? null,
+    reviews: p?.reviews ?? null,
+    place_id: p?.place_id || p?.data_id || null,
+    link: p?.link || p?.website || null,
+    gps_coordinates: p?.gps_coordinates || null,
+  };
+}
+
+// Nur “sichere” Showtimes-Items fürs Frontend
+function normalizeShowtimeItems(serpData) {
+  // Manche SerpApi Antworten enthalten spezielle Felder – wenn vorhanden, nimm die:
+  const maybeMovie = serpData?.movie_results || serpData?.showtimes || null;
+  if (Array.isArray(maybeMovie) && maybeMovie.length) {
+    return maybeMovie.slice(0, 10).map((x) => ({
+      title: x?.title || "Spielzeit",
+      link: x?.link || x?.showtimes_link || null,
+      snippet: x?.snippet || x?.showtimes || "",
+      source: "movie_results",
+    }));
   }
+
+  // Fallback: organische Treffer (funktioniert zuverlässig)
+  const organic = serpData?.organic_results || [];
+  return organic.slice(0, 10).map((r) => ({
+    title: r?.title || "Treffer",
+    link: r?.link || null,
+    snippet: r?.snippet || "",
+    source: "organic_results",
+  }));
 }
 
 // --------------------
-// Nominatim: PLZ/Stadt -> Geo
+// Nominatim
 // --------------------
 async function nominatimSearch(q) {
   const url =
     "https://nominatim.openstreetmap.org/search?format=json&limit=1&addressdetails=1&q=" +
     encodeURIComponent(q);
 
-  const r = await fetchJson(
-    url,
-    { headers: { "User-Agent": "nachts-im-kino/1.0 (render)" } },
-    12000
-  );
+  const r = await fetch(url, {
+    headers: { "User-Agent": "nachts-im-kino/1.0 (render)" },
+  });
 
-  if (!r.ok || !Array.isArray(r.data)) return [];
-  return r.data;
+  if (!r.ok) return [];
+  return r.json();
 }
 
 // --------------------
-// SerpAPI: Google Maps Suche (Kinos)
+// SerpApi: Google Maps (Kinos)
 // --------------------
 async function serpApiGoogleMaps({ key, city, lat, lon }) {
   const url = new URL("https://serpapi.com/search.json");
@@ -150,59 +154,42 @@ async function serpApiGoogleMaps({ key, city, lat, lon }) {
   url.searchParams.set("gl", "de");
   url.searchParams.set("api_key", key);
 
-  // Koordinaten erhöhen Trefferquote
   if (lat && lon) {
     url.searchParams.set("ll", `@${lat},${lon},12z`);
   }
 
-  return fetchJson(url.toString(), {}, 20000);
+  const r = await fetch(url.toString());
+  const data = await r.json().catch(() => null);
+
+  if (!r.ok) return { ok: false, status: r.status, data };
+  return { ok: true, status: 200, data };
 }
 
 // --------------------
-// SerpAPI: Google Movies (Spielzeiten)
-// -> tbm=mv sorgt dafür, dass SerpApi i.d.R. movie_results/showtimes liefert
+// SerpApi: Google Search (Spielzeiten)  ✅ OHNE tbm
 // --------------------
-async function serpApiShowtimesMovies({ key, cinemaName, city }) {
+async function serpApiShowtimes({ key, cinemaName, city }) {
   const url = new URL("https://serpapi.com/search.json");
   url.searchParams.set("engine", "google");
-  url.searchParams.set("tbm", "mv"); // ✅ Movies / Showtimes
-  url.searchParams.set("q", `showtimes ${cinemaName} ${city}`);
+
+  // Query so gebaut, dass häufig kino.de / Kinoseiten / Google-Showtimes kommen:
+  url.searchParams.set(
+    "q",
+    `Spielzeiten ${cinemaName} ${city} heute kino`
+  );
+
   url.searchParams.set("hl", "de");
   url.searchParams.set("gl", "de");
   url.searchParams.set("google_domain", "google.de");
+  url.searchParams.set("num", "10");
   url.searchParams.set("api_key", key);
 
-  return fetchJson(url.toString(), {}, 20000);
-}
+  // WICHTIG: KEIN tbm=mv (das ist unsupported)
+  const r = await fetch(url.toString());
+  const data = await r.json().catch(() => null);
 
-// Spielzeiten normalisieren (was SerpApi liefert, kann variieren)
-function normalizeMovies(data) {
-  const movies =
-    data?.movie_results ||
-    data?.movies_results ||
-    data?.showtimes ||
-    [];
-
-  // Versuche, auf ein einheitliches Format zu bringen:
-  // [{ title, showtimes:[{time}], ... }]
-  if (!Array.isArray(movies)) return [];
-
-  return movies.map((m) => {
-    const showtimes = Array.isArray(m?.showtimes)
-      ? m.showtimes.map((s) => ({
-          time: s?.time || s?.start_time || s?.datetime || null,
-          link: s?.link || null,
-        }))
-      : [];
-
-    return {
-      title: m?.title || m?.name || "Film",
-      poster: m?.thumbnail || m?.image || null,
-      showtimes,
-      // optional:
-      raw: undefined, // absichtlich nicht voll ausgeben
-    };
-  });
+  if (!r.ok) return { ok: false, status: r.status, data };
+  return { ok: true, status: 200, data };
 }
 
 // --------------------
@@ -215,9 +202,8 @@ app.get("/api/cinemas", async (req, res) => {
     if (!key) return res.status(500).json({ ok: false, error: "SERPAPI_KEY fehlt" });
 
     const q = (req.query.q || "").toString().trim();
-    if (!q) return res.status(400).json({ ok: false, error: "q fehlt (z. B. ?q=10115 oder ?q=Köln)" });
+    if (!q) return res.status(400).json({ ok: false, error: "q fehlt" });
 
-    // 1) Geo
     const geo = await nominatimSearch(q);
     if (!geo.length) return res.status(404).json({ ok: false, error: "Ort nicht gefunden" });
 
@@ -225,35 +211,23 @@ app.get("/api/cinemas", async (req, res) => {
     const lat = toNumber(geo[0].lat);
     const lon = toNumber(geo[0].lon);
 
-    // 2) SerpAPI Google Maps
     const result = await serpApiGoogleMaps({ key, city, lat, lon });
     if (!result.ok) {
-      return res.status(result.status || 500).json({
-        ok: false,
-        error: "SerpApi Fehler (google_maps)",
-        details: result.data,
-      });
+      return res.status(result.status).json({ ok: false, error: "SerpApi Fehler (maps)", details: result.data });
     }
 
     const raw = result.data?.local_results || result.data?.place_results || [];
-    const cinemas = Array.isArray(raw)
-      ? raw.filter(isCinemaPlace).map(normalizeCinema)
-      : [];
+    const cinemas = raw.filter(isCinemaPlace).map(normalizeCinema);
 
     return res.json({
       ok: true,
-      source: "serpapi-google_maps",
       input: q,
       resolved_city: city,
       coords_used: lat && lon ? { lat, lon } : null,
       cinemas,
     });
   } catch (e) {
-    return res.status(500).json({
-      ok: false,
-      error: "Serverfehler",
-      details: String(e?.message || e),
-    });
+    return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
 });
 
@@ -266,81 +240,37 @@ app.get("/api/showtimes", async (req, res) => {
     const key = (process.env.SERPAPI_KEY || "").trim();
     if (!key) return res.status(500).json({ ok: false, error: "SERPAPI_KEY fehlt" });
 
-    // ✅ Zwei Modi:
-    // A) neu: name + city => echte Spielzeiten
-    // B) alt: q => Kino-Suche (Kompatibilität)
     const name = (req.query.name || "").toString().trim();
     const city = (req.query.city || "").toString().trim();
-    const q = (req.query.q || "").toString().trim();
 
-    // --- B) Legacy: /api/showtimes?q=Köln -> gib Kinos zurück ---
-    if (!name && q) {
-      // gleiche Logik wie /api/cinemas
-      const geo = await nominatimSearch(q);
-      if (!geo.length) return res.status(404).json({ ok: false, error: "Ort nicht gefunden" });
+    if (!name) return res.status(400).json({ ok: false, error: "name fehlt" });
+    if (!city) return res.status(400).json({ ok: false, error: "city fehlt" });
 
-      const resolvedCity = pickCity(geo[0], q);
-      const lat = toNumber(geo[0].lat);
-      const lon = toNumber(geo[0].lon);
-
-      const result = await serpApiGoogleMaps({ key, city: resolvedCity, lat, lon });
-      if (!result.ok) {
-        return res.status(result.status || 500).json({
-          ok: false,
-          error: "SerpApi Fehler (google_maps)",
-          details: result.data,
-        });
-      }
-
-      const raw = result.data?.local_results || result.data?.place_results || [];
-      const cinemas = Array.isArray(raw)
-        ? raw.filter(isCinemaPlace).map(normalizeCinema)
-        : [];
-
-      return res.json({
-        ok: true,
-        mode: "legacy-cinemas",
-        source: "serpapi-google_maps",
-        input: q,
-        resolved_city: resolvedCity,
-        cinemas,
-      });
+    // Extra Safety: wenn jemand “Erdbeermund …” als Kino übergibt -> blocken
+    const lower = name.toLowerCase();
+    if (BLOCKED_WORDS.some((w) => lower.includes(w))) {
+      return res.status(400).json({ ok: false, error: "Ungültiges Kino (blockiert)" });
     }
 
-    // --- A) Neu: name+city -> Spielzeiten ---
-    if (!name) return res.status(400).json({ ok: false, error: "name fehlt (z. B. ?name=Filmpalast%20Köln)" });
-    if (!city) return res.status(400).json({ ok: false, error: "city fehlt (z. B. ?city=Köln)" });
-
-    const result = await serpApiShowtimesMovies({ key, cinemaName: name, city });
+    const result = await serpApiShowtimes({ key, cinemaName: name, city });
     if (!result.ok) {
-      return res.status(result.status || 500).json({
-        ok: false,
-        error: "SerpApi Fehler (movies/showtimes)",
-        details: result.data,
-      });
+      return res.status(result.status).json({ ok: false, error: "SerpApi Fehler (showtimes)", details: result.data });
     }
 
-    const movies = normalizeMovies(result.data);
+    const items = normalizeShowtimeItems(result.data);
 
     return res.json({
       ok: true,
-      source: "serpapi-movies",
       cinema: name,
       city,
-      movies,
-      // falls du debug brauchst, kannst du raw wieder aktivieren:
-      // raw: result.data,
+      items,       // <- Das nutzt dein Frontend
+      raw: result.data, // <- nur zum Debuggen; wenn du’s nicht willst: löschen
     });
   } catch (e) {
-    return res.status(500).json({
-      ok: false,
-      error: "Serverfehler",
-      details: String(e?.message || e),
-    });
+    return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
 });
 
-// --------------------
 app.listen(PORT, () => {
   console.log("Server läuft auf Port", PORT);
 });
