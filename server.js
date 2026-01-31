@@ -58,7 +58,7 @@ app.get("/api/showtimes", async (req, res) => {
       append: "movies,cinemas"
     });
 
-    const url = "https://international-showtimes.p.rapidapi.com/getShowtimes?" + params.toString();
+    const url = "https://international-showtimes.p.rapidapi.com/showtimes/getShowtimes?" + params.toString();
     const r = await fetch(url, {
   headers: {
     "X-RapidAPI-Key": process.env.RAPIDAPI_KEY,
