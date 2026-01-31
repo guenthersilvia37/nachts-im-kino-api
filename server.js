@@ -63,6 +63,7 @@ app.get("/api/showtimes", async (req, res) => {
   headers: {
     "X-RapidAPI-Key": process.env.RAPIDAPI_KEY,
     "X-RapidAPI-Host": "international-showtimes.p.rapidapi.com",
+    "X-Api-Key": process.env.RAPIDAPI_KEY,
     "Accept-Language": "de"
   }
 });
