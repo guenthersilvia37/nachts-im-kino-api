@@ -58,16 +58,14 @@ app.get("/api/showtimes", async (req, res) => {
       append: "movies,cinemas"
     });
 
-    const url = "https://international-showtimes.p.rapidapi.com/v4/showtimes?" + params.toString();
-
+    const url = "https://international-showtimes.p.rapidapi.com/showtimes?" + params.toString();
     const r = await fetch(url, {
-      headers: {
-        "X-RapidAPI-Key": rapidKey,
-        "X-RapidAPI-Host": "international-showtimes.p.rapidapi.com",
-        "Accept-Language": "de"
-      }
-    });
-
+  headers: {
+    "X-RapidAPI-Key": process.env.RAPIDAPI_KEY,
+    "X-RapidAPI-Host": "international-showtimes.p.rapidapi.com",
+    "Accept-Language": "de"
+  }
+});
     const data = await r.json();
     if (!r.ok) return res.status(r.status).json({ error: "RapidAPI Fehler", details: data });
 
