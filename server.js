@@ -47,9 +47,7 @@ function toNumber(v) {
   return Number.isFinite(n) ? n : null;
 }
 
-// --------------------
 // Blocklist (Erotik/Noise)
-// --------------------
 const BLOCKED_WORDS = [
   "erotik",
   "sex",
@@ -57,7 +55,6 @@ const BLOCKED_WORDS = [
   "adult",
   "bordell",
   "strip",
-  "sauna",
   "sauna club",
   "massage",
   "escort",
@@ -69,9 +66,7 @@ function isBlockedTitle(title) {
   return BLOCKED_WORDS.some((w) => t.includes(w));
 }
 
-// --------------------
 // Kino erkennen
-// --------------------
 function isCinemaPlace(p) {
   const title = escStr(p?.title || p?.name).toLowerCase();
   const type = escStr(p?.type).toLowerCase();
@@ -95,8 +90,6 @@ function isCinemaPlace(p) {
   ];
 
   const looksLikeCinemaByText = cinemaWords.some((w) => title.includes(w));
-
-  // SerpApi google_maps liefert manchmal type/category
   const looksLikeCinemaByCategory =
     category.includes("movie") ||
     category.includes("cinema") ||
@@ -107,9 +100,8 @@ function isCinemaPlace(p) {
 }
 
 function normalizeCinema(p) {
-  const title = p?.title || p?.name || "Kino";
   return {
-    title,
+    title: p?.title || p?.name || "Kino",
     address: p?.address || p?.full_address || "",
     rating: p?.rating ?? null,
     reviews: p?.reviews ?? null,
@@ -120,84 +112,6 @@ function normalizeCinema(p) {
 }
 
 // --------------------
-// Showtimes normalisieren (Kalender)
-// Liefert: days[] -> movies[] -> {title, poster, info, times, link}
-// --------------------
-function normalizeShowtimes(showtimesArr) {
-  const days = [];
-
-  for (const d of (showtimesArr || [])) {
-    const dayLabel = d?.day || "";
-    const dateLabel = d?.date || "";
-    const movies = [];
-
-    for (const m of (d?.movies || [])) {
-      const title = m?.name || m?.title || "";
-
-      // SerpApi-Felder können variieren -> wir picken das häufigste
-      const poster =
-        m?.thumbnail ||
-        m?.poster ||
-        m?.image ||
-        (Array.isArray(m?.images) ? m.images[0] : null) ||
-        null;
-
-      const info = {
-        genre: m?.genre || m?.genres || null,
-        duration: m?.duration || m?.runtime || null,
-        rating: m?.rating || m?.imdb_rating || null,
-        description: m?.description || m?.snippet || null,
-      };
-
-      const times = [];
-      for (const s of (m?.showing || [])) {
-        for (const t of (s?.time || [])) times.push(t);
-      }
-
-      const uniqTimes = [...new Set(times)].filter(Boolean);
-
-      movies.push({
-        title,
-        link: m?.link || null,
-        poster,
-        info,
-        times: uniqTimes,
-      });
-    }
-
-    days.push({
-      day: dayLabel,
-      date: dateLabel,
-      movies,
-    });
-  }
-
-  return days;
-}
-
-// --------------------
-// Simple Cache (in-memory)
-// --------------------
-const CACHE = new Map();
-// key -> { expires:number, value:any }
-function cacheGet(key) {
-  const entry = CACHE.get(key);
-  if (!entry) return null;
-  if (Date.now() > entry.expires) {
-    CACHE.delete(key);
-    return null;
-  }
-  return entry.value;
-}
-function cacheSet(key, value, ttlMs) {
-  CACHE.set(key, { value, expires: Date.now() + ttlMs });
-}
-
-// TTLs
-const TTL_CINEMAS = 10 * 60 * 1000;   // 10 min
-const TTL_SHOWTIMES = 10 * 60 * 1000; // 10 min
-
-// --------------------
 // Nominatim
 // --------------------
 async function nominatimSearch(q) {
@@ -206,10 +120,7 @@ async function nominatimSearch(q) {
     encodeURIComponent(q);
 
   const r = await fetch(url, {
-    headers: {
-      // Bitte eine halbwegs eindeutige UA nutzen
-      "User-Agent": "nachts-im-kino/1.0 (render)",
-    },
+    headers: { "User-Agent": "nachts-im-kino/1.0 (render)" },
   });
 
   if (!r.ok) return [];
@@ -227,7 +138,6 @@ async function serpApiGoogleMaps({ key, city, lat, lon }) {
   url.searchParams.set("gl", "de");
   url.searchParams.set("api_key", key);
 
-  // Mit Koordinaten kommt "in der Nähe" zuverlässiger
   if (lat && lon) url.searchParams.set("ll", `@${lat},${lon},12z`);
 
   const r = await fetch(url.toString());
@@ -238,9 +148,8 @@ async function serpApiGoogleMaps({ key, city, lat, lon }) {
 }
 
 // --------------------
-// SerpApi: Google Search (Showtimes Block)
-// Wichtig: KEIN tbm=mv setzen!
-// Wir triggern Showtimes über Query + Location.
+// SerpApi: Showtimes Block (Google Search)
+// (Kein tbm erzwingen)
 // --------------------
 async function serpApiShowtimes({ key, cinemaName, city }) {
   const url = new URL("https://serpapi.com/search.json");
@@ -260,6 +169,109 @@ async function serpApiShowtimes({ key, cinemaName, city }) {
 }
 
 // --------------------
+// Poster + Info: SerpApi Google (Knowledge Graph / Top Results)
+// --------------------
+const posterCache = new Map(); // title -> { poster, snippet, link }
+const POSTER_CACHE_TTL_MS = 1000 * 60 * 60 * 24; // 24h
+
+function getCache(key) {
+  const entry = posterCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.t > POSTER_CACHE_TTL_MS) {
+    posterCache.delete(key);
+    return null;
+  }
+  return entry.v;
+}
+
+function setCache(key, value) {
+  posterCache.set(key, { t: Date.now(), v: value });
+}
+
+async function serpApiMoviePoster({ key, movieTitle, city }) {
+  const cacheKey = `${movieTitle}__${city}`.toLowerCase();
+  const cached = getCache(cacheKey);
+  if (cached) return cached;
+
+  // Query: Film + Poster (de) – oft Knowledge Graph mit Bild
+  const url = new URL("https://serpapi.com/search.json");
+  url.searchParams.set("engine", "google");
+  url.searchParams.set("q", `${movieTitle} Film Poster`);
+  url.searchParams.set("hl", "de");
+  url.searchParams.set("gl", "de");
+  url.searchParams.set("google_domain", "google.de");
+  url.searchParams.set("api_key", key);
+
+  const r = await fetch(url.toString());
+  const data = await r.json().catch(() => null);
+
+  if (!r.ok || !data) {
+    const fallback = { poster: null, snippet: null, link: null };
+    setCache(cacheKey, fallback);
+    return fallback;
+  }
+
+  // 1) Knowledge Graph image (wenn vorhanden)
+  const kgImg = data?.knowledge_graph?.header_images?.[0]?.image;
+  const kgLink = data?.knowledge_graph?.website || data?.knowledge_graph?.link;
+
+  // 2) Fallback: erstes organic result
+  const first = Array.isArray(data?.organic_results) ? data.organic_results[0] : null;
+  const snippet = first?.snippet || data?.knowledge_graph?.description || null;
+  const link = kgLink || first?.link || null;
+
+  const result = {
+    poster: kgImg || null,
+    snippet: snippet || null,
+    link: link || null,
+  };
+
+  setCache(cacheKey, result);
+  return result;
+}
+
+// --------------------
+// Showtimes normalisieren (Kino -> Filme -> Zeiten)
+// --------------------
+function normalizeShowtimes(showtimesArr) {
+  const days = [];
+
+  for (const d of showtimesArr || []) {
+    const dayLabel = d?.day || "";
+    const dateLabel = d?.date || "";
+
+    const movies = [];
+
+    for (const m of d?.movies || []) {
+      const title = m?.name || m?.title || "";
+
+      const times = [];
+      for (const s of m?.showing || []) {
+        for (const t of s?.time || []) times.push(t);
+      }
+      const uniqTimes = [...new Set(times)].filter(Boolean);
+
+      movies.push({
+        title,
+        link: m?.link || null,
+        times: uniqTimes,
+        poster: null,     // wird gleich angereichert
+        snippet: null,    // wird gleich angereichert
+        infoLink: null,   // wird gleich angereichert
+      });
+    }
+
+    days.push({
+      day: dayLabel,
+      date: dateLabel,
+      movies,
+    });
+  }
+
+  return days;
+}
+
+// --------------------
 // GET /api/cinemas?q=...
 // --------------------
 app.get("/api/cinemas", async (req, res) => {
@@ -269,10 +281,6 @@ app.get("/api/cinemas", async (req, res) => {
 
     const q = (req.query.q || "").toString().trim();
     if (!q) return res.status(400).json({ ok: false, error: "q fehlt (z. B. ?q=10115 oder ?q=Köln)" });
-
-    const cacheKey = `cinemas:${q.toLowerCase()}`;
-    const cached = cacheGet(cacheKey);
-    if (cached) return res.json(cached);
 
     const geo = await nominatimSearch(q);
     if (!geo.length) return res.status(404).json({ ok: false, error: "Ort nicht gefunden" });
@@ -292,15 +300,12 @@ app.get("/api/cinemas", async (req, res) => {
       .map(normalizeCinema)
       .filter((c) => !isBlockedTitle(c.title));
 
-    const payload = {
+    return res.json({
       ok: true,
       resolved_city: city,
       coords_used: lat && lon ? { lat, lon } : null,
       cinemas,
-    };
-
-    cacheSet(cacheKey, payload, TTL_CINEMAS);
-    return res.json(payload);
+    });
   } catch (e) {
     return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
@@ -308,7 +313,7 @@ app.get("/api/cinemas", async (req, res) => {
 
 // --------------------
 // GET /api/showtimes?name=...&city=...
-// -> liefert days[] (Kalender) mit movies + times + poster + info
+// -> liefert days[] mit movies(times, poster, snippet)
 // --------------------
 app.get("/api/showtimes", async (req, res) => {
   try {
@@ -325,37 +330,57 @@ app.get("/api/showtimes", async (req, res) => {
       return res.status(400).json({ ok: false, error: "Dieses Kino ist blockiert." });
     }
 
-    const cacheKey = `showtimes:${city.toLowerCase()}:${name.toLowerCase()}`;
-    const cached = cacheGet(cacheKey);
-    if (cached) return res.json(cached);
-
     const result = await serpApiShowtimes({ key, cinemaName: name, city });
     if (!result.ok) {
-      return res.status(result.status).json({
-        ok: false,
-        error: "SerpApi Fehler (showtimes)",
-        details: result.data,
-      });
+      return res.status(result.status).json({ ok: false, error: "SerpApi Fehler (showtimes)", details: result.data });
     }
 
     const showtimesArr = result.data?.showtimes || [];
     const days = normalizeShowtimes(showtimesArr);
 
-    // Wenn SerpApi keinen Showtimes-Block liefert:
-    // -> wir geben ok:true zurück, aber days leer + Hinweis fürs Frontend
-    const payload = {
+    // ---- Poster + Info anreichern ----
+    // Limit: wir holen nur für die ersten N Filme Poster, um SerpApi-Kosten zu begrenzen
+    const MAX_POSTERS = 10;
+
+    const uniqueTitles = [];
+    for (const d of days) {
+      for (const m of d.movies || []) {
+        if (!m.title) continue;
+        if (!uniqueTitles.includes(m.title)) uniqueTitles.push(m.title);
+        if (uniqueTitles.length >= MAX_POSTERS) break;
+      }
+      if (uniqueTitles.length >= MAX_POSTERS) break;
+    }
+
+    const posterMap = new Map();
+    await Promise.all(
+      uniqueTitles.map(async (t) => {
+        try {
+          const info = await serpApiMoviePoster({ key, movieTitle: t, city });
+          posterMap.set(t, info);
+        } catch {
+          posterMap.set(t, { poster: null, snippet: null, link: null });
+        }
+      })
+    );
+
+    for (const d of days) {
+      for (const m of d.movies || []) {
+        const info = posterMap.get(m.title);
+        if (info) {
+          m.poster = info.poster;
+          m.snippet = info.snippet;
+          m.infoLink = info.link;
+        }
+      }
+    }
+
+    return res.json({
       ok: true,
       cinema: name,
       city,
       days,
-      raw_has_showtimes: Array.isArray(showtimesArr) && showtimesArr.length > 0,
-      hint: (!showtimesArr?.length)
-        ? "Google/SerpApi hat keinen Showtimes-Block geliefert. Das ist leider normal und schwankt je nach Kino/Stadt."
-        : null,
-    };
-
-    cacheSet(cacheKey, payload, TTL_SHOWTIMES);
-    return res.json(payload);
+    });
   } catch (e) {
     return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
