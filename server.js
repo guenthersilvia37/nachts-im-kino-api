@@ -49,21 +49,31 @@ app.get("/api/showtimes", async (req, res) => {
     const now = new Date();
     const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
-    const params = new URLSearchParams({
-      location: `${loc.lat},${loc.lon}`,
-      distance: "10",
-      countries: "DE",
-      time_from: now.toISOString(),
-      time_to: tomorrow.toISOString(),
-      append: "movies,cinemas"
-    });
+    const isKey = process.env.IS_API_KEY || process.env.RAPIDAPI_KEY;
 
-    const url = "https://international-showtimes.p.rapidapi.com/showtimes/getShowtimes?" + params.toString();
-    const r = await fetch(url, {
+const now = new Date();
+const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+const params = new URLSearchParams({
+  location: `${loc.lat},${loc.lon}`,
+  distance: "10",
+  countries: "DE",
+  time_from: now.toISOString(),
+  time_to: tomorrow.toISOString(),
+  append: "movies,cinemas",
+  apikey: isKey
+});
+
+const url =
+  "https://international-showtimes.p.rapidapi.com/showtimes/getShowtimes?" +
+  params.toString();
+
+const r = await fetch(url, {
   headers: {
     "X-RapidAPI-Key": process.env.RAPIDAPI_KEY,
     "X-RapidAPI-Host": "international-showtimes.p.rapidapi.com",
-    "X-Api-Key": process.env.RAPIDAPI_KEY,
+    "X-API-Key": isKey,
+    "X-Api-Key": isKey,
     "Accept-Language": "de"
   }
 });
