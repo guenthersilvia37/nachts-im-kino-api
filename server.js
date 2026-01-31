@@ -25,9 +25,8 @@ app.get("/api/health", (req, res) => res.json({ ok: true }));
 // --------------------
 // Helpers
 // --------------------
-function toNumber(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
+function escStr(v) {
+  return String(v ?? "");
 }
 
 function pickCity(geoItem, fallback) {
@@ -43,7 +42,12 @@ function pickCity(geoItem, fallback) {
   );
 }
 
-// Blockliste (Erotik/Noise)
+function toNumber(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Blocklist (Erwachsenen/Noise) – sowohl Backend als auch Frontend kann zusätzlich filtern
 const BLOCKED_WORDS = [
   "erotik",
   "sex",
@@ -52,20 +56,23 @@ const BLOCKED_WORDS = [
   "bordell",
   "strip",
   "sauna club",
-  "saunaclub",
   "massage",
   "escort",
   "erdbeermund",
-  "lovehotel",
-  "swinger",
 ];
 
-function isCinemaPlace(p) {
-  const title = String(p?.title || p?.name || "").toLowerCase();
-  const type = String(p?.type || "").toLowerCase();
-  const category = String(p?.category || "").toLowerCase();
+function isBlockedTitle(title) {
+  const t = escStr(title).toLowerCase();
+  return BLOCKED_WORDS.some((w) => t.includes(w));
+}
 
-  if (BLOCKED_WORDS.some((w) => title.includes(w))) return false;
+// Kino erkennen
+function isCinemaPlace(p) {
+  const title = escStr(p?.title || p?.name).toLowerCase();
+  const type = escStr(p?.type).toLowerCase();
+  const category = escStr(p?.category).toLowerCase();
+
+  if (isBlockedTitle(title)) return false;
 
   const cinemaWords = [
     "kino",
@@ -83,6 +90,7 @@ function isCinemaPlace(p) {
   ];
 
   const looksLikeCinemaByText = cinemaWords.some((w) => title.includes(w));
+
   const looksLikeCinemaByCategory =
     category.includes("movie") ||
     category.includes("cinema") ||
@@ -104,27 +112,45 @@ function normalizeCinema(p) {
   };
 }
 
-// Nur “sichere” Showtimes-Items fürs Frontend
-function normalizeShowtimeItems(serpData) {
-  // Manche SerpApi Antworten enthalten spezielle Felder – wenn vorhanden, nimm die:
-  const maybeMovie = serpData?.movie_results || serpData?.showtimes || null;
-  if (Array.isArray(maybeMovie) && maybeMovie.length) {
-    return maybeMovie.slice(0, 10).map((x) => ({
-      title: x?.title || "Spielzeit",
-      link: x?.link || x?.showtimes_link || null,
-      snippet: x?.snippet || x?.showtimes || "",
-      source: "movie_results",
-    }));
+// Showtimes normalisieren (aus SerpApi `showtimes`)
+function normalizeShowtimes(showtimesArr) {
+  // SerpApi liefert z.B.
+  // - für theaters: showtimes[].movies[].showing[].time[]
+  // - für movies: showtimes[].theaters[].showing[].time[]
+  // Wir fokussieren hier auf "theaters"-Variante (Kino -> Filme)
+  const days = [];
+
+  for (const d of (showtimesArr || [])) {
+    const dayLabel = d?.day || "";
+    const dateLabel = d?.date || "";
+    const movies = [];
+
+    for (const m of (d?.movies || [])) {
+      const title = m?.name || m?.title || "";
+      const times = [];
+
+      for (const s of (m?.showing || [])) {
+        for (const t of (s?.time || [])) times.push(t);
+      }
+
+      // Duplikate raus, Reihenfolge behalten
+      const uniqTimes = [...new Set(times)].filter(Boolean);
+
+      movies.push({
+        title,
+        link: m?.link || null,
+        times: uniqTimes,
+      });
+    }
+
+    days.push({
+      day: dayLabel,
+      date: dateLabel,
+      movies,
+    });
   }
 
-  // Fallback: organische Treffer (funktioniert zuverlässig)
-  const organic = serpData?.organic_results || [];
-  return organic.slice(0, 10).map((r) => ({
-    title: r?.title || "Treffer",
-    link: r?.link || null,
-    snippet: r?.snippet || "",
-    source: "organic_results",
-  }));
+  return days;
 }
 
 // --------------------
@@ -154,9 +180,7 @@ async function serpApiGoogleMaps({ key, city, lat, lon }) {
   url.searchParams.set("gl", "de");
   url.searchParams.set("api_key", key);
 
-  if (lat && lon) {
-    url.searchParams.set("ll", `@${lat},${lon},12z`);
-  }
+  if (lat && lon) url.searchParams.set("ll", `@${lat},${lon},12z`);
 
   const r = await fetch(url.toString());
   const data = await r.json().catch(() => null);
@@ -166,25 +190,21 @@ async function serpApiGoogleMaps({ key, city, lat, lon }) {
 }
 
 // --------------------
-// SerpApi: Google Search (Spielzeiten)  ✅ OHNE tbm
+// SerpApi: Google Search (Showtimes-Block)
+// Wichtig: KEIN tbm=mv erzwingen!
+// Wir triggern den Showtimes-Block über Query + Location.
+// SerpApi packt ihn dann als `showtimes` ins JSON.  [oai_citation:2‡SerpApi](https://serpapi.com/showtimes-results)
 // --------------------
 async function serpApiShowtimes({ key, cinemaName, city }) {
   const url = new URL("https://serpapi.com/search.json");
   url.searchParams.set("engine", "google");
-
-  // Query so gebaut, dass häufig kino.de / Kinoseiten / Google-Showtimes kommen:
-  url.searchParams.set(
-    "q",
-    `Spielzeiten ${cinemaName} ${city} heute kino`
-  );
-
+  url.searchParams.set("q", `${cinemaName} Spielzeiten ${city}`);
+  url.searchParams.set("location", `${city}, Germany`);
   url.searchParams.set("hl", "de");
   url.searchParams.set("gl", "de");
   url.searchParams.set("google_domain", "google.de");
-  url.searchParams.set("num", "10");
   url.searchParams.set("api_key", key);
 
-  // WICHTIG: KEIN tbm=mv (das ist unsupported)
   const r = await fetch(url.toString());
   const data = await r.json().catch(() => null);
 
@@ -193,8 +213,7 @@ async function serpApiShowtimes({ key, cinemaName, city }) {
 }
 
 // --------------------
-// API: Kinos finden
-// GET /api/cinemas?q=10115
+// GET /api/cinemas?q=...
 // --------------------
 app.get("/api/cinemas", async (req, res) => {
   try {
@@ -202,7 +221,7 @@ app.get("/api/cinemas", async (req, res) => {
     if (!key) return res.status(500).json({ ok: false, error: "SERPAPI_KEY fehlt" });
 
     const q = (req.query.q || "").toString().trim();
-    if (!q) return res.status(400).json({ ok: false, error: "q fehlt" });
+    if (!q) return res.status(400).json({ ok: false, error: "q fehlt (z. B. ?q=10115 oder ?q=Köln)" });
 
     const geo = await nominatimSearch(q);
     if (!geo.length) return res.status(404).json({ ok: false, error: "Ort nicht gefunden" });
@@ -213,15 +232,17 @@ app.get("/api/cinemas", async (req, res) => {
 
     const result = await serpApiGoogleMaps({ key, city, lat, lon });
     if (!result.ok) {
-      return res.status(result.status).json({ ok: false, error: "SerpApi Fehler (maps)", details: result.data });
+      return res.status(result.status).json({ ok: false, error: "SerpApi Fehler", details: result.data });
     }
 
     const raw = result.data?.local_results || result.data?.place_results || [];
-    const cinemas = raw.filter(isCinemaPlace).map(normalizeCinema);
+    const cinemas = raw
+      .filter(isCinemaPlace)
+      .map(normalizeCinema)
+      .filter((c) => !isBlockedTitle(c.title));
 
     return res.json({
       ok: true,
-      input: q,
       resolved_city: city,
       coords_used: lat && lon ? { lat, lon } : null,
       cinemas,
@@ -232,8 +253,8 @@ app.get("/api/cinemas", async (req, res) => {
 });
 
 // --------------------
-// API: Spielzeiten
-// GET /api/showtimes?name=Filmpalast%20K%C3%B6ln&city=K%C3%B6ln
+// GET /api/showtimes?name=...&city=...
+// -> liefert days[] (Kalender) mit movies + times
 // --------------------
 app.get("/api/showtimes", async (req, res) => {
   try {
@@ -243,13 +264,11 @@ app.get("/api/showtimes", async (req, res) => {
     const name = (req.query.name || "").toString().trim();
     const city = (req.query.city || "").toString().trim();
 
-    if (!name) return res.status(400).json({ ok: false, error: "name fehlt" });
-    if (!city) return res.status(400).json({ ok: false, error: "city fehlt" });
+    if (!name) return res.status(400).json({ ok: false, error: "name fehlt (z. B. ?name=Filmpalast%20K%C3%B6ln)" });
+    if (!city) return res.status(400).json({ ok: false, error: "city fehlt (z. B. ?city=K%C3%B6ln)" });
 
-    // Extra Safety: wenn jemand “Erdbeermund …” als Kino übergibt -> blocken
-    const lower = name.toLowerCase();
-    if (BLOCKED_WORDS.some((w) => lower.includes(w))) {
-      return res.status(400).json({ ok: false, error: "Ungültiges Kino (blockiert)" });
+    if (isBlockedTitle(name)) {
+      return res.status(400).json({ ok: false, error: "Dieses Kino ist blockiert." });
     }
 
     const result = await serpApiShowtimes({ key, cinemaName: name, city });
@@ -257,14 +276,16 @@ app.get("/api/showtimes", async (req, res) => {
       return res.status(result.status).json({ ok: false, error: "SerpApi Fehler (showtimes)", details: result.data });
     }
 
-    const items = normalizeShowtimeItems(result.data);
+    const showtimesArr = result.data?.showtimes || [];
+    const days = normalizeShowtimes(showtimesArr);
 
     return res.json({
       ok: true,
       cinema: name,
       city,
-      items,       // <- Das nutzt dein Frontend
-      raw: result.data, // <- nur zum Debuggen; wenn du’s nicht willst: löschen
+      days,           // ✅ für Kalender im Frontend
+      raw_has_showtimes: Array.isArray(showtimesArr) && showtimesArr.length > 0,
+      // raw: result.data, // nur zum Debuggen (optional)
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
