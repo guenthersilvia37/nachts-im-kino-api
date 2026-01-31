@@ -56,6 +56,7 @@ const BLOCKED_WORDS = [
   "bordell",
   "strip",
   "sauna club",
+  "sauna",
   "massage",
   "escort",
   "erdbeermund",
@@ -149,7 +150,6 @@ async function serpApiGoogleMaps({ key, city, lat, lon }) {
 
 // --------------------
 // SerpApi: Showtimes Block (Google Search)
-// (Kein tbm erzwingen)
 // --------------------
 async function serpApiShowtimes({ key, cinemaName, city }) {
   const url = new URL("https://serpapi.com/search.json");
@@ -169,9 +169,9 @@ async function serpApiShowtimes({ key, cinemaName, city }) {
 }
 
 // --------------------
-// Poster + Info: SerpApi Google (Knowledge Graph / Top Results)
+// Poster Cache (TTL)
 // --------------------
-const posterCache = new Map(); // title -> { poster, snippet, link }
+const posterCache = new Map(); // key -> { t, v }
 const POSTER_CACHE_TTL_MS = 1000 * 60 * 60 * 24; // 24h
 
 function getCache(key) {
@@ -188,15 +188,52 @@ function setCache(key, value) {
   posterCache.set(key, { t: Date.now(), v: value });
 }
 
-async function serpApiMoviePoster({ key, movieTitle, city }) {
-  const cacheKey = `${movieTitle}__${city}`.toLowerCase();
+// --------------------
+// SerpApi: Poster-Fallback via google_images (besser als KG-only)
+// --------------------
+async function serpApiPoster({ key, title, hl = "de", gl = "de" }) {
+  const cacheKey = `img::${hl}::${gl}::${title}`.toLowerCase();
   const cached = getCache(cacheKey);
   if (cached) return cached;
 
-  // Query: Film + Poster (de) – oft Knowledge Graph mit Bild
+  const url = new URL("https://serpapi.com/search.json");
+  url.searchParams.set("engine", "google_images");
+  url.searchParams.set("q", `${title} film poster`);
+  url.searchParams.set("hl", hl);
+  url.searchParams.set("gl", gl);
+  url.searchParams.set("google_domain", "google.de");
+  url.searchParams.set("safe", "active");
+  url.searchParams.set("api_key", key);
+
+  const r = await fetch(url.toString());
+  const data = await r.json().catch(() => null);
+
+  if (!r.ok || !data) {
+    const fallback = { ok: false, poster: null };
+    setCache(cacheKey, fallback);
+    return fallback;
+  }
+
+  const first = Array.isArray(data.images_results) ? data.images_results[0] : null;
+  const poster = first?.thumbnail || first?.original || null;
+
+  const result = { ok: true, poster };
+  setCache(cacheKey, result);
+  return result;
+}
+
+// --------------------
+// SerpApi: Movie-Info (Snippet + Link) via normal Google
+// (optional, aber hilfreich für “Mehr Infos”)
+// --------------------
+async function serpApiMovieInfo({ key, movieTitle }) {
+  const cacheKey = `info::${movieTitle}`.toLowerCase();
+  const cached = getCache(cacheKey);
+  if (cached) return cached;
+
   const url = new URL("https://serpapi.com/search.json");
   url.searchParams.set("engine", "google");
-  url.searchParams.set("q", `${movieTitle} Film Poster`);
+  url.searchParams.set("q", `${movieTitle} Film`);
   url.searchParams.set("hl", "de");
   url.searchParams.set("gl", "de");
   url.searchParams.set("google_domain", "google.de");
@@ -205,27 +242,11 @@ async function serpApiMoviePoster({ key, movieTitle, city }) {
   const r = await fetch(url.toString());
   const data = await r.json().catch(() => null);
 
-  if (!r.ok || !data) {
-    const fallback = { poster: null, snippet: null, link: null };
-    setCache(cacheKey, fallback);
-    return fallback;
-  }
-
-  // 1) Knowledge Graph image (wenn vorhanden)
-  const kgImg = data?.knowledge_graph?.header_images?.[0]?.image;
-  const kgLink = data?.knowledge_graph?.website || data?.knowledge_graph?.link;
-
-  // 2) Fallback: erstes organic result
   const first = Array.isArray(data?.organic_results) ? data.organic_results[0] : null;
   const snippet = first?.snippet || data?.knowledge_graph?.description || null;
-  const link = kgLink || first?.link || null;
+  const link = data?.knowledge_graph?.website || data?.knowledge_graph?.link || first?.link || null;
 
-  const result = {
-    poster: kgImg || null,
-    snippet: snippet || null,
-    link: link || null,
-  };
-
+  const result = { snippet, link };
   setCache(cacheKey, result);
   return result;
 }
@@ -241,7 +262,6 @@ function normalizeShowtimes(showtimesArr) {
     const dateLabel = d?.date || "";
 
     const movies = [];
-
     for (const m of d?.movies || []) {
       const title = m?.name || m?.title || "";
 
@@ -253,11 +273,13 @@ function normalizeShowtimes(showtimesArr) {
 
       movies.push({
         title,
-        link: m?.link || null,
+        link: m?.link || null, // manchmal Kino-Info-Link
         times: uniqTimes,
-        poster: null,     // wird gleich angereichert
-        snippet: null,    // wird gleich angereichert
-        infoLink: null,   // wird gleich angereichert
+        poster: m?.thumbnail || m?.poster || null, // falls SerpApi doch eins liefert
+        info: {
+          description: null,
+        },
+        infoLink: null,
       });
     }
 
@@ -313,7 +335,7 @@ app.get("/api/cinemas", async (req, res) => {
 
 // --------------------
 // GET /api/showtimes?name=...&city=...
-// -> liefert days[] mit movies(times, poster, snippet)
+// -> liefert days[] mit movies(times, poster?, info?)
 // --------------------
 app.get("/api/showtimes", async (req, res) => {
   try {
@@ -323,8 +345,8 @@ app.get("/api/showtimes", async (req, res) => {
     const name = (req.query.name || "").toString().trim();
     const city = (req.query.city || "").toString().trim();
 
-    if (!name) return res.status(400).json({ ok: false, error: "name fehlt (z. B. ?name=Filmpalast%20K%C3%B6ln)" });
-    if (!city) return res.status(400).json({ ok: false, error: "city fehlt (z. B. ?city=K%C3%B6ln)" });
+    if (!name) return res.status(400).json({ ok: false, error: "name fehlt" });
+    if (!city) return res.status(400).json({ ok: false, error: "city fehlt" });
 
     if (isBlockedTitle(name)) {
       return res.status(400).json({ ok: false, error: "Dieses Kino ist blockiert." });
@@ -338,40 +360,55 @@ app.get("/api/showtimes", async (req, res) => {
     const showtimesArr = result.data?.showtimes || [];
     const days = normalizeShowtimes(showtimesArr);
 
-    // ---- Poster + Info anreichern ----
-    // Limit: wir holen nur für die ersten N Filme Poster, um SerpApi-Kosten zu begrenzen
-    const MAX_POSTERS = 10;
+    // OPTIONAL: für die ersten N Filme Poster/Info serverseitig anreichern,
+    // aber N klein halten, sonst wird es langsam + kostet Credits.
+    const MAX_ENRICH = 8;
 
-    const uniqueTitles = [];
+    const uniqTitles = [];
     for (const d of days) {
       for (const m of d.movies || []) {
         if (!m.title) continue;
-        if (!uniqueTitles.includes(m.title)) uniqueTitles.push(m.title);
-        if (uniqueTitles.length >= MAX_POSTERS) break;
+        if (isBlockedTitle(m.title)) continue;
+        if (!uniqTitles.includes(m.title)) uniqTitles.push(m.title);
+        if (uniqTitles.length >= MAX_ENRICH) break;
       }
-      if (uniqueTitles.length >= MAX_POSTERS) break;
+      if (uniqTitles.length >= MAX_ENRICH) break;
     }
 
-    const posterMap = new Map();
+    // Poster + Info parallel holen
+    const enrichMap = new Map();
     await Promise.all(
-      uniqueTitles.map(async (t) => {
+      uniqTitles.map(async (t) => {
         try {
-          const info = await serpApiMoviePoster({ key, movieTitle: t, city });
-          posterMap.set(t, info);
+          const [p, info] = await Promise.all([
+            serpApiPoster({ key, title: t }),
+            serpApiMovieInfo({ key, movieTitle: t }),
+          ]);
+          enrichMap.set(t, {
+            poster: p?.ok ? p.poster : null,
+            snippet: info?.snippet || null,
+            link: info?.link || null,
+          });
         } catch {
-          posterMap.set(t, { poster: null, snippet: null, link: null });
+          enrichMap.set(t, { poster: null, snippet: null, link: null });
         }
       })
     );
 
     for (const d of days) {
       for (const m of d.movies || []) {
-        const info = posterMap.get(m.title);
-        if (info) {
-          m.poster = info.poster;
-          m.snippet = info.snippet;
-          m.infoLink = info.link;
+        const extra = enrichMap.get(m.title);
+        if (!extra) continue;
+
+        // nur überschreiben, wenn noch kein Poster existiert
+        if (!m.poster && extra.poster) m.poster = extra.poster;
+
+        if (!m.info?.description && extra.snippet) {
+          m.info = m.info || {};
+          m.info.description = extra.snippet;
         }
+
+        if (!m.infoLink && extra.link) m.infoLink = extra.link;
       }
     }
 
@@ -380,7 +417,31 @@ app.get("/api/showtimes", async (req, res) => {
       cinema: name,
       city,
       days,
+      raw_has_showtimes: Array.isArray(showtimesArr) && showtimesArr.length > 0,
     });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
+  }
+});
+
+// --------------------
+// ✅ NEU: GET /api/poster?title=...
+// -> für dein Frontend: Poster nachladen, wenn "Kein Poster" angezeigt wird
+// --------------------
+app.get("/api/poster", async (req, res) => {
+  try {
+    const key = (process.env.SERPAPI_KEY || "").trim();
+    if (!key) return res.status(500).json({ ok: false, error: "SERPAPI_KEY fehlt" });
+
+    const title = (req.query.title || "").toString().trim();
+    if (!title) return res.status(400).json({ ok: false, error: "title fehlt" });
+
+    if (isBlockedTitle(title)) {
+      return res.json({ ok: true, poster: null });
+    }
+
+    const result = await serpApiPoster({ key, title });
+    return res.json(result);
   } catch (e) {
     return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
@@ -388,4 +449,4 @@ app.get("/api/showtimes", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log("Server läuft auf Port", PORT);
-}); 
+});
