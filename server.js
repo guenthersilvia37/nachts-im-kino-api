@@ -6,9 +6,6 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// --------------------
-// Keys
-// --------------------
 const SERPAPI_KEY = (process.env.SERPAPI_KEY || "").trim();
 const TMDB_KEY = (process.env.TMDB_KEY || "").trim();
 
@@ -35,6 +32,11 @@ function escStr(v) {
   return String(v ?? "");
 }
 
+function toNumber(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 function pickCity(geoItem, fallback) {
   const a = geoItem?.address || {};
   return (
@@ -48,12 +50,9 @@ function pickCity(geoItem, fallback) {
   );
 }
 
-function toNumber(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
-// Blocklist (Erotik/Noise)
+// --------------------
+// Blocklist: Adult / Erotik / Noise (hart)
+// --------------------
 const BLOCKED_WORDS = [
   "erotik",
   "sex",
@@ -62,20 +61,20 @@ const BLOCKED_WORDS = [
   "porno",
   "porn",
   "blue movie",
+  "fkk",
   "bordell",
   "strip",
+  "peepshow",
+  "escort",
+  "privatclub",
   "sauna club",
   "sauna",
   "massage",
-  "escort",
-  "fkk",
-  "privatclub",
-  "peepshow",
   "erdbeermund",
   "kino hole",
   "hole kino",
   "sexkino",
-  "adult kino"
+  "adult kino",
 ];
 
 function isBlockedTitle(title) {
@@ -83,42 +82,82 @@ function isBlockedTitle(title) {
   return BLOCKED_WORDS.some((w) => t.includes(w));
 }
 
-// Kino erkennen
-function isCinemaPlace(p) {
-  const title = escStr(p?.title || p?.name).toLowerCase();
+// --------------------
+// Kino-Filter (nur normale Kinos)
+// --------------------
+const CINEMA_WORDS = [
+  "kino",
+  "cinema",
+  "movie theater",
+  "movie theatre",
+  "filmtheater",
+  "lichtspiele",
+  "filmhaus",
+  "programmkino",
+  "arthouse",
+  "filmkunst",
+];
+
+const CINEMA_BRANDS = [
+  "cinemaxx",
+  "uci",
+  "cineplex",
+  "cinestar",
+  "kinopolis",
+  "filmpalast",
+  "metropolis",
+];
+
+const BAD_VENUE_WORDS = [
+  "club",
+  "bar",
+  "lounge",
+  "bordell",
+  "sauna",
+  "massage",
+  "studio",
+];
+
+// SerpApi google_maps liefert manchmal: type/category = "movie_theater"
+function looksLikeCinemaByCategory(p) {
   const type = escStr(p?.type).toLowerCase();
   const category = escStr(p?.category).toLowerCase();
-
-  // ❌ Sofort raus wenn verdächtig
-  if (isBlockedTitle(title)) return false;
-
-  // ✅ Muss ein echtes Kino sein
-  const allowedBrands = [
-    "cinemaxx",
-    "uci",
-    "cineplex",
-    "cinestar",
-    "kinopolis",
-    "filmpalast",
-    "metropolis",
-    "arthouse",
-    "lichtspiele",
-    "filmtheater"
-  ];
-
-  const looksLikeRealCinema =
-    allowedBrands.some(b => title.includes(b)) ||
-    title.includes("kino") ||
-    title.includes("cinema");
-
-  const looksLikeCinemaByCategory =
+  return (
+    type.includes("movie") ||
+    type.includes("cinema") ||
+    type.includes("theater") ||
     category.includes("movie") ||
     category.includes("cinema") ||
-    type.includes("movie") ||
-    type.includes("cinema");
-
-  return looksLikeRealCinema && looksLikeCinemaByCategory;
+    category.includes("theater")
+  );
 }
+
+// Haupt-Check
+function isCinemaPlace(p) {
+  const title = escStr(p?.title || p?.name).toLowerCase();
+
+  // 1) Adult/Noise sofort raus
+  if (isBlockedTitle(title)) return false;
+
+  // 2) Orte, die eher Clubs/Bars sind, raus (zusätzliche Sicherheit)
+  if (BAD_VENUE_WORDS.some((w) => title.includes(w))) {
+    // aber: wenn es eindeutig eine bekannte Kinokette ist, trotzdem erlauben
+    const isBrand = CINEMA_BRANDS.some((b) => title.includes(b));
+    if (!isBrand) return false;
+  }
+
+  // 3) Kino-Signale
+  const byText =
+    CINEMA_BRANDS.some((b) => title.includes(b)) ||
+    CINEMA_WORDS.some((w) => title.includes(w));
+
+  const byCat = looksLikeCinemaByCategory(p);
+
+  // ✅ Regel: Kategorie ODER Textsignal muss passen, besser beides
+  // aber wenn SerpApi die Kategorie nicht liefert, reicht Textsignal
+  return byText || byCat;
+}
+
 function normalizeCinema(p) {
   return {
     title: p?.title || p?.name || "Kino",
@@ -128,6 +167,8 @@ function normalizeCinema(p) {
     place_id: p?.place_id || p?.data_id || null,
     link: p?.link || p?.website || null,
     gps_coordinates: p?.gps_coordinates || null,
+    category: p?.category || null,
+    type: p?.type || null,
   };
 }
 
@@ -150,13 +191,15 @@ async function nominatimSearch(q) {
 // --------------------
 // SerpApi: Google Maps (Kinos)
 // --------------------
-async function serpApiGoogleMaps({ key, city, lat, lon }) {
+async function serpApiGoogleMaps({ city, lat, lon }) {
+  if (!SERPAPI_KEY) return { ok: false, status: 500, data: { error: "SERPAPI_KEY fehlt" } };
+
   const url = new URL("https://serpapi.com/search.json");
   url.searchParams.set("engine", "google_maps");
   url.searchParams.set("q", `Kino in ${city}`);
   url.searchParams.set("hl", "de");
   url.searchParams.set("gl", "de");
-  url.searchParams.set("api_key", key);
+  url.searchParams.set("api_key", SERPAPI_KEY);
 
   if (lat && lon) url.searchParams.set("ll", `@${lat},${lon},12z`);
 
@@ -170,7 +213,9 @@ async function serpApiGoogleMaps({ key, city, lat, lon }) {
 // --------------------
 // SerpApi: Showtimes Block (Google Search)
 // --------------------
-async function serpApiShowtimes({ key, cinemaName, city }) {
+async function serpApiShowtimes({ cinemaName, city }) {
+  if (!SERPAPI_KEY) return { ok: false, status: 500, data: { error: "SERPAPI_KEY fehlt" } };
+
   const url = new URL("https://serpapi.com/search.json");
   url.searchParams.set("engine", "google");
   url.searchParams.set("q", `${cinemaName} Spielzeiten ${city}`);
@@ -178,7 +223,7 @@ async function serpApiShowtimes({ key, cinemaName, city }) {
   url.searchParams.set("hl", "de");
   url.searchParams.set("gl", "de");
   url.searchParams.set("google_domain", "google.de");
-  url.searchParams.set("api_key", key);
+  url.searchParams.set("api_key", SERPAPI_KEY);
 
   const r = await fetch(url.toString());
   const data = await r.json().catch(() => null);
@@ -199,7 +244,8 @@ function normalizeShowtimes(showtimesArr) {
 
     const movies = [];
     for (const m of d?.movies || []) {
-      const title = m?.name || m?.title || "";
+      const title = (m?.name || m?.title || "").trim();
+      if (!title) continue;
 
       const times = [];
       for (const s of m?.showing || []) {
@@ -209,7 +255,6 @@ function normalizeShowtimes(showtimesArr) {
 
       movies.push({
         title,
-        link: m?.link || null,
         times: uniqTimes,
         poster: m?.thumbnail || m?.poster || null,
         info: {
@@ -241,9 +286,7 @@ async function tmdbFetch(path, params = {}) {
   url.searchParams.set("api_key", TMDB_KEY);
   url.searchParams.set("language", "de-DE");
 
-  for (const [k, v] of Object.entries(params)) {
-    url.searchParams.set(k, v);
-  }
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
 
   const r = await fetch(url.toString());
   if (!r.ok) return null;
@@ -255,22 +298,44 @@ async function tmdbMovieByTitle(title) {
 
   const search = await tmdbFetch("search/movie", { query: title });
   const movie = search?.results?.[0];
-  if (!movie) return null;
+  if (!movie?.id) return null;
 
   const [details, credits] = await Promise.all([
     tmdbFetch(`movie/${movie.id}`),
     tmdbFetch(`movie/${movie.id}/credits`),
   ]);
 
+  const poster = movie.poster_path
+    ? `https://image.tmdb.org/t/p/w342${movie.poster_path}`
+    : null;
+
   return {
-    poster: movie.poster_path
-      ? `https://image.tmdb.org/t/p/w342${movie.poster_path}`
-      : null,
+    title: details?.title || title,
+    poster,
     description: details?.overview || null,
     runtime: details?.runtime ? `${details.runtime} Min` : null,
     genres: (details?.genres || []).map((g) => g.name),
     cast: (credits?.cast || []).slice(0, 6).map((a) => a.name),
   };
+}
+
+// --------------------
+// Simple in-memory cache (TMDB)
+// --------------------
+const memCache = new Map(); // key -> {t,v}
+const CACHE_TTL_MS = 1000 * 60 * 60 * 12; // 12h
+
+function cacheGet(key) {
+  const e = memCache.get(key);
+  if (!e) return null;
+  if (Date.now() - e.t > CACHE_TTL_MS) {
+    memCache.delete(key);
+    return null;
+  }
+  return e.v;
+}
+function cacheSet(key, v) {
+  memCache.set(key, { t: Date.now(), v });
 }
 
 // --------------------
@@ -290,12 +355,11 @@ app.get("/api/cinemas", async (req, res) => {
     const lat = toNumber(geo[0].lat);
     const lon = toNumber(geo[0].lon);
 
-    const result = await serpApiGoogleMaps({ key: SERPAPI_KEY, city, lat, lon });
-    if (!result.ok) {
-      return res.status(result.status).json({ ok: false, error: "SerpApi Fehler", details: result.data });
-    }
+    const result = await serpApiGoogleMaps({ city, lat, lon });
+    if (!result.ok) return res.status(result.status).json({ ok: false, error: "SerpApi Fehler", details: result.data });
 
     const raw = result.data?.local_results || result.data?.place_results || [];
+
     const cinemas = raw
       .filter(isCinemaPlace)
       .map(normalizeCinema)
@@ -314,7 +378,7 @@ app.get("/api/cinemas", async (req, res) => {
 
 // --------------------
 // GET /api/showtimes?name=...&city=...
-// -> days[] + TMDB Film-Infos
+// -> days[] mit Filmen + Zeiten + TMDB Infos (Poster/Cast/Genres/etc.)
 // --------------------
 app.get("/api/showtimes", async (req, res) => {
   try {
@@ -322,40 +386,45 @@ app.get("/api/showtimes", async (req, res) => {
 
     const name = (req.query.name || "").toString().trim();
     const city = (req.query.city || "").toString().trim();
-
     if (!name) return res.status(400).json({ ok: false, error: "name fehlt" });
     if (!city) return res.status(400).json({ ok: false, error: "city fehlt" });
 
-    if (isBlockedTitle(name)) {
-      return res.status(400).json({ ok: false, error: "Dieses Kino ist blockiert." });
-    }
+    if (isBlockedTitle(name)) return res.status(400).json({ ok: false, error: "Dieses Kino ist blockiert." });
 
-    const result = await serpApiShowtimes({ key: SERPAPI_KEY, cinemaName: name, city });
-    if (!result.ok) {
-      return res.status(result.status).json({ ok: false, error: "SerpApi Fehler (showtimes)", details: result.data });
-    }
+    const result = await serpApiShowtimes({ cinemaName: name, city });
+    if (!result.ok) return res.status(result.status).json({ ok: false, error: "SerpApi Fehler", details: result.data });
 
     const showtimesArr = result.data?.showtimes || [];
     const days = normalizeShowtimes(showtimesArr);
 
-    // TMDB Enrich (limitiert)
-    const MAX_ENRICH = 10;
-    const uniq = [];
+    // TMDB enrich (limitiert)
+    const MAX_ENRICH = 12;
+    const uniqTitles = [];
 
     for (const d of days) {
       for (const m of d.movies || []) {
         const t = (m.title || "").trim();
         if (!t) continue;
-        if (!uniq.includes(t)) uniq.push(t);
-        if (uniq.length >= MAX_ENRICH) break;
+        if (isBlockedTitle(t)) continue;
+        if (!uniqTitles.includes(t)) uniqTitles.push(t);
+        if (uniqTitles.length >= MAX_ENRICH) break;
       }
-      if (uniq.length >= MAX_ENRICH) break;
+      if (uniqTitles.length >= MAX_ENRICH) break;
     }
 
     const infoMap = new Map();
     await Promise.all(
-      uniq.map(async (t) => {
-        infoMap.set(t, await tmdbMovieByTitle(t));
+      uniqTitles.map(async (t) => {
+        const ck = `tmdb::${t}`.toLowerCase();
+        const cached = cacheGet(ck);
+        if (cached !== null) {
+          infoMap.set(t, cached);
+          return;
+        }
+
+        const info = await tmdbMovieByTitle(t);
+        cacheSet(ck, info);
+        infoMap.set(t, info);
       })
     );
 
@@ -381,86 +450,61 @@ app.get("/api/showtimes", async (req, res) => {
       city,
       days,
       raw_has_showtimes: Array.isArray(showtimesArr) && showtimesArr.length > 0,
-      tmdb_enabled: Boolean(TMDB_KEY),
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
 });
-// ✅ NEU: GET /api/movie?title=...
-// -> liefert TMDB Infos (poster, description, runtime, genres, cast)
-app.get("/api/movie", async (req, res) => {
-  try{
-    const title = (req.query.title || "").toString().trim();
-    if(!title) return res.status(400).json({ ok:false, error:"title fehlt" });
 
-    if (!TMDB_KEY) {
-      return res.status(500).json({ ok:false, error:"TMDB_KEY fehlt (in Render/ENV setzen)" });
-    }
+// --------------------
+// GET /api/movie?title=...
+// -> einzelner Film aus TMDB (für Nachladen im Frontend)
+// --------------------
+app.get("/api/movie", async (req, res) => {
+  try {
+    const title = (req.query.title || "").toString().trim();
+    if (!title) return res.status(400).json({ ok: false, error: "title fehlt" });
+    if (isBlockedTitle(title)) return res.json({ ok: true, movie: null });
+
+    if (!TMDB_KEY) return res.json({ ok: true, movie: null, hint: "TMDB_KEY fehlt" });
+
+    const ck = `tmdb::${title}`.toLowerCase();
+    const cached = cacheGet(ck);
+    if (cached !== null) return res.json({ ok: true, movie: cached });
 
     const movie = await tmdbMovieByTitle(title);
-    return res.json({ ok:true, movie: movie || null });
-  }catch(e){
-    return res.status(500).json({ ok:false, error:"Serverfehler", details:String(e?.message || e) });
+    cacheSet(ck, movie);
+    return res.json({ ok: true, movie });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
 });
-// ✅ NEU: GET /api/movie-details?title=...
-// -> Details + Credits + Videos (Trailer) + Images (Bilder)
-app.get("/api/movie-details", async (req, res) => {
-  try{
+
+// --------------------
+// GET /api/poster?title=...
+// -> Poster-only (aus TMDB)
+// --------------------
+app.get("/api/poster", async (req, res) => {
+  try {
     const title = (req.query.title || "").toString().trim();
-    if(!title) return res.status(400).json({ ok:false, error:"title fehlt" });
+    if (!title) return res.status(400).json({ ok: false, error: "title fehlt" });
+    if (isBlockedTitle(title)) return res.json({ ok: true, poster: null });
 
-    if(!TMDB_KEY) return res.status(500).json({ ok:false, error:"TMDB_KEY fehlt" });
+    if (!TMDB_KEY) return res.json({ ok: true, poster: null, hint: "TMDB_KEY fehlt" });
 
-    // 1) Suche
-    const search = await tmdbFetch("search/movie", { query: title });
-    const base = search?.results?.[0];
-    if(!base) return res.json({ ok:true, movie:null });
+    const ck = `tmdb::${title}`.toLowerCase();
+    const cached = cacheGet(ck);
+    if (cached && cached.poster) return res.json({ ok: true, poster: cached.poster });
 
-    // 2) Details + Credits + Videos + Images
-    const id = base.id;
-    const [details, credits, videos, images] = await Promise.all([
-      tmdbFetch(`movie/${id}`),
-      tmdbFetch(`movie/${id}/credits`),
-      tmdbFetch(`movie/${id}/videos`),
-      tmdbFetch(`movie/${id}/images`, { include_image_language: "null" }),
-    ]);
+    const movie = await tmdbMovieByTitle(title);
+    cacheSet(ck, movie);
 
-    // Trailer finden (YouTube bevorzugt)
-    const vids = Array.isArray(videos?.results) ? videos.results : [];
-    const trailer =
-      vids.find(v => v.site === "YouTube" && v.type === "Trailer") ||
-      vids.find(v => v.site === "YouTube" && v.type === "Teaser") ||
-      null;
-
-    const poster = base.poster_path ? `https://image.tmdb.org/t/p/w342${base.poster_path}` : null;
-
-    const backs = Array.isArray(images?.backdrops) ? images.backdrops : [];
-    const posters = Array.isArray(images?.posters) ? images.posters : [];
-
-    const imageUrls = [
-      ...backs.slice(0, 8).map(x => x.file_path ? `https://image.tmdb.org/t/p/w780${x.file_path}` : null),
-      ...posters.slice(0, 6).map(x => x.file_path ? `https://image.tmdb.org/t/p/w342${x.file_path}` : null),
-    ].filter(Boolean);
-
-    return res.json({
-      ok: true,
-      movie: {
-        title: details?.title || base.title || title,
-        poster,
-        description: details?.overview || null,
-        runtime: details?.runtime ? `${details.runtime} Min` : null,
-        genres: (details?.genres || []).map(g => g.name),
-        cast: (credits?.cast || []).slice(0, 10).map(a => a.name),
-        trailer: trailer ? { site: trailer.site, key: trailer.key, name: trailer.name } : null,
-        images: imageUrls,
-      }
-    });
-  }catch(e){
-    return res.status(500).json({ ok:false, error:"Serverfehler", details:String(e?.message || e) });
+    return res.json({ ok: true, poster: movie?.poster || null });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
 });
+
 app.listen(PORT, () => {
   console.log("Server läuft auf Port", PORT);
 });
