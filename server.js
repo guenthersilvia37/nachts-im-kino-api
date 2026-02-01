@@ -7,6 +7,12 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // --------------------
+// Keys
+// --------------------
+const SERPAPI_KEY = (process.env.SERPAPI_KEY || "").trim();
+const TMDB_KEY = (process.env.TMDB_KEY || "").trim();
+
+// --------------------
 // CORS
 // --------------------
 app.use((req, res, next) => {
@@ -79,7 +85,6 @@ function isCinemaPlace(p) {
     "kino",
     "cinema",
     "cine",
-    "film",
     "lichtspiel",
     "filmpalast",
     "metropolis",
@@ -169,89 +174,6 @@ async function serpApiShowtimes({ key, cinemaName, city }) {
 }
 
 // --------------------
-// Poster Cache (TTL)
-// --------------------
-const posterCache = new Map(); // key -> { t, v }
-const POSTER_CACHE_TTL_MS = 1000 * 60 * 60 * 24; // 24h
-
-function getCache(key) {
-  const entry = posterCache.get(key);
-  if (!entry) return null;
-  if (Date.now() - entry.t > POSTER_CACHE_TTL_MS) {
-    posterCache.delete(key);
-    return null;
-  }
-  return entry.v;
-}
-
-function setCache(key, value) {
-  posterCache.set(key, { t: Date.now(), v: value });
-}
-
-// --------------------
-// SerpApi: Poster-Fallback via google_images (besser als KG-only)
-// --------------------
-async function serpApiPoster({ key, title, hl = "de", gl = "de" }) {
-  const cacheKey = `img::${hl}::${gl}::${title}`.toLowerCase();
-  const cached = getCache(cacheKey);
-  if (cached) return cached;
-
-  const url = new URL("https://serpapi.com/search.json");
-  url.searchParams.set("engine", "google_images");
-  url.searchParams.set("q", `${title} film poster`);
-  url.searchParams.set("hl", hl);
-  url.searchParams.set("gl", gl);
-  url.searchParams.set("google_domain", "google.de");
-  url.searchParams.set("safe", "active");
-  url.searchParams.set("api_key", key);
-
-  const r = await fetch(url.toString());
-  const data = await r.json().catch(() => null);
-
-  if (!r.ok || !data) {
-    const fallback = { ok: false, poster: null };
-    setCache(cacheKey, fallback);
-    return fallback;
-  }
-
-  const first = Array.isArray(data.images_results) ? data.images_results[0] : null;
-  const poster = first?.thumbnail || first?.original || null;
-
-  const result = { ok: true, poster };
-  setCache(cacheKey, result);
-  return result;
-}
-
-// --------------------
-// SerpApi: Movie-Info (Snippet + Link) via normal Google
-// (optional, aber hilfreich für “Mehr Infos”)
-// --------------------
-async function serpApiMovieInfo({ key, movieTitle }) {
-  const cacheKey = `info::${movieTitle}`.toLowerCase();
-  const cached = getCache(cacheKey);
-  if (cached) return cached;
-
-  const url = new URL("https://serpapi.com/search.json");
-  url.searchParams.set("engine", "google");
-  url.searchParams.set("q", `${movieTitle} Film`);
-  url.searchParams.set("hl", "de");
-  url.searchParams.set("gl", "de");
-  url.searchParams.set("google_domain", "google.de");
-  url.searchParams.set("api_key", key);
-
-  const r = await fetch(url.toString());
-  const data = await r.json().catch(() => null);
-
-  const first = Array.isArray(data?.organic_results) ? data.organic_results[0] : null;
-  const snippet = first?.snippet || data?.knowledge_graph?.description || null;
-  const link = data?.knowledge_graph?.website || data?.knowledge_graph?.link || first?.link || null;
-
-  const result = { snippet, link };
-  setCache(cacheKey, result);
-  return result;
-}
-
-// --------------------
 // Showtimes normalisieren (Kino -> Filme -> Zeiten)
 // --------------------
 function normalizeShowtimes(showtimesArr) {
@@ -273,13 +195,15 @@ function normalizeShowtimes(showtimesArr) {
 
       movies.push({
         title,
-        link: m?.link || null, // manchmal Kino-Info-Link
+        link: m?.link || null,
         times: uniqTimes,
-        poster: m?.thumbnail || m?.poster || null, // falls SerpApi doch eins liefert
+        poster: m?.thumbnail || m?.poster || null,
         info: {
           description: null,
+          runtime: null,
+          genres: [],
+          cast: [],
         },
-        infoLink: null,
       });
     }
 
@@ -294,15 +218,56 @@ function normalizeShowtimes(showtimesArr) {
 }
 
 // --------------------
+// TMDB helpers
+// --------------------
+async function tmdbFetch(path, params = {}) {
+  if (!TMDB_KEY) return null;
+
+  const url = new URL(`https://api.themoviedb.org/3/${path}`);
+  url.searchParams.set("api_key", TMDB_KEY);
+  url.searchParams.set("language", "de-DE");
+
+  for (const [k, v] of Object.entries(params)) {
+    url.searchParams.set(k, v);
+  }
+
+  const r = await fetch(url.toString());
+  if (!r.ok) return null;
+  return r.json();
+}
+
+async function tmdbMovieByTitle(title) {
+  if (!TMDB_KEY || !title) return null;
+
+  const search = await tmdbFetch("search/movie", { query: title });
+  const movie = search?.results?.[0];
+  if (!movie) return null;
+
+  const [details, credits] = await Promise.all([
+    tmdbFetch(`movie/${movie.id}`),
+    tmdbFetch(`movie/${movie.id}/credits`),
+  ]);
+
+  return {
+    poster: movie.poster_path
+      ? `https://image.tmdb.org/t/p/w342${movie.poster_path}`
+      : null,
+    description: details?.overview || null,
+    runtime: details?.runtime ? `${details.runtime} Min` : null,
+    genres: (details?.genres || []).map((g) => g.name),
+    cast: (credits?.cast || []).slice(0, 6).map((a) => a.name),
+  };
+}
+
+// --------------------
 // GET /api/cinemas?q=...
 // --------------------
 app.get("/api/cinemas", async (req, res) => {
   try {
-    const key = (process.env.SERPAPI_KEY || "").trim();
-    if (!key) return res.status(500).json({ ok: false, error: "SERPAPI_KEY fehlt" });
+    if (!SERPAPI_KEY) return res.status(500).json({ ok: false, error: "SERPAPI_KEY fehlt" });
 
     const q = (req.query.q || "").toString().trim();
-    if (!q) return res.status(400).json({ ok: false, error: "q fehlt (z. B. ?q=10115 oder ?q=Köln)" });
+    if (!q) return res.status(400).json({ ok: false, error: "q fehlt" });
 
     const geo = await nominatimSearch(q);
     if (!geo.length) return res.status(404).json({ ok: false, error: "Ort nicht gefunden" });
@@ -311,7 +276,7 @@ app.get("/api/cinemas", async (req, res) => {
     const lat = toNumber(geo[0].lat);
     const lon = toNumber(geo[0].lon);
 
-    const result = await serpApiGoogleMaps({ key, city, lat, lon });
+    const result = await serpApiGoogleMaps({ key: SERPAPI_KEY, city, lat, lon });
     if (!result.ok) {
       return res.status(result.status).json({ ok: false, error: "SerpApi Fehler", details: result.data });
     }
@@ -335,12 +300,11 @@ app.get("/api/cinemas", async (req, res) => {
 
 // --------------------
 // GET /api/showtimes?name=...&city=...
-// -> liefert days[] mit movies(times, poster?, info?)
+// -> days[] + TMDB Film-Infos
 // --------------------
 app.get("/api/showtimes", async (req, res) => {
   try {
-    const key = (process.env.SERPAPI_KEY || "").trim();
-    if (!key) return res.status(500).json({ ok: false, error: "SERPAPI_KEY fehlt" });
+    if (!SERPAPI_KEY) return res.status(500).json({ ok: false, error: "SERPAPI_KEY fehlt" });
 
     const name = (req.query.name || "").toString().trim();
     const city = (req.query.city || "").toString().trim();
@@ -352,7 +316,7 @@ app.get("/api/showtimes", async (req, res) => {
       return res.status(400).json({ ok: false, error: "Dieses Kino ist blockiert." });
     }
 
-    const result = await serpApiShowtimes({ key, cinemaName: name, city });
+    const result = await serpApiShowtimes({ key: SERPAPI_KEY, cinemaName: name, city });
     if (!result.ok) {
       return res.status(result.status).json({ ok: false, error: "SerpApi Fehler (showtimes)", details: result.data });
     }
@@ -360,55 +324,40 @@ app.get("/api/showtimes", async (req, res) => {
     const showtimesArr = result.data?.showtimes || [];
     const days = normalizeShowtimes(showtimesArr);
 
-    // OPTIONAL: für die ersten N Filme Poster/Info serverseitig anreichern,
-    // aber N klein halten, sonst wird es langsam + kostet Credits.
-    const MAX_ENRICH = 8;
+    // TMDB Enrich (limitiert)
+    const MAX_ENRICH = 10;
+    const uniq = [];
 
-    const uniqTitles = [];
     for (const d of days) {
       for (const m of d.movies || []) {
-        if (!m.title) continue;
-        if (isBlockedTitle(m.title)) continue;
-        if (!uniqTitles.includes(m.title)) uniqTitles.push(m.title);
-        if (uniqTitles.length >= MAX_ENRICH) break;
+        const t = (m.title || "").trim();
+        if (!t) continue;
+        if (!uniq.includes(t)) uniq.push(t);
+        if (uniq.length >= MAX_ENRICH) break;
       }
-      if (uniqTitles.length >= MAX_ENRICH) break;
+      if (uniq.length >= MAX_ENRICH) break;
     }
 
-    // Poster + Info parallel holen
-    const enrichMap = new Map();
+    const infoMap = new Map();
     await Promise.all(
-      uniqTitles.map(async (t) => {
-        try {
-          const [p, info] = await Promise.all([
-            serpApiPoster({ key, title: t }),
-            serpApiMovieInfo({ key, movieTitle: t }),
-          ]);
-          enrichMap.set(t, {
-            poster: p?.ok ? p.poster : null,
-            snippet: info?.snippet || null,
-            link: info?.link || null,
-          });
-        } catch {
-          enrichMap.set(t, { poster: null, snippet: null, link: null });
-        }
+      uniq.map(async (t) => {
+        infoMap.set(t, await tmdbMovieByTitle(t));
       })
     );
 
     for (const d of days) {
       for (const m of d.movies || []) {
-        const extra = enrichMap.get(m.title);
-        if (!extra) continue;
+        const info = infoMap.get((m.title || "").trim());
+        if (!info) continue;
 
-        // nur überschreiben, wenn noch kein Poster existiert
-        if (!m.poster && extra.poster) m.poster = extra.poster;
+        if (!m.poster && info.poster) m.poster = info.poster;
 
-        if (!m.info?.description && extra.snippet) {
-          m.info = m.info || {};
-          m.info.description = extra.snippet;
-        }
-
-        if (!m.infoLink && extra.link) m.infoLink = extra.link;
+        m.info = {
+          description: info.description || null,
+          runtime: info.runtime || null,
+          genres: info.genres || [],
+          cast: info.cast || [],
+        };
       }
     }
 
@@ -418,30 +367,8 @@ app.get("/api/showtimes", async (req, res) => {
       city,
       days,
       raw_has_showtimes: Array.isArray(showtimesArr) && showtimesArr.length > 0,
+      tmdb_enabled: Boolean(TMDB_KEY),
     });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
-  }
-});
-
-// --------------------
-// ✅ NEU: GET /api/poster?title=...
-// -> für dein Frontend: Poster nachladen, wenn "Kein Poster" angezeigt wird
-// --------------------
-app.get("/api/poster", async (req, res) => {
-  try {
-    const key = (process.env.SERPAPI_KEY || "").trim();
-    if (!key) return res.status(500).json({ ok: false, error: "SERPAPI_KEY fehlt" });
-
-    const title = (req.query.title || "").toString().trim();
-    if (!title) return res.status(400).json({ ok: false, error: "title fehlt" });
-
-    if (isBlockedTitle(title)) {
-      return res.json({ ok: true, poster: null });
-    }
-
-    const result = await serpApiPoster({ key, title });
-    return res.json(result);
   } catch (e) {
     return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
