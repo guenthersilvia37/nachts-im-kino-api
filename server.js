@@ -390,6 +390,63 @@ app.get("/api/movie", async (req, res) => {
     return res.status(500).json({ ok:false, error:"Serverfehler", details:String(e?.message || e) });
   }
 });
+// ✅ NEU: GET /api/movie-details?title=...
+// -> Details + Credits + Videos (Trailer) + Images (Bilder)
+app.get("/api/movie-details", async (req, res) => {
+  try{
+    const title = (req.query.title || "").toString().trim();
+    if(!title) return res.status(400).json({ ok:false, error:"title fehlt" });
+
+    if(!TMDB_KEY) return res.status(500).json({ ok:false, error:"TMDB_KEY fehlt" });
+
+    // 1) Suche
+    const search = await tmdbFetch("search/movie", { query: title });
+    const base = search?.results?.[0];
+    if(!base) return res.json({ ok:true, movie:null });
+
+    // 2) Details + Credits + Videos + Images
+    const id = base.id;
+    const [details, credits, videos, images] = await Promise.all([
+      tmdbFetch(`movie/${id}`),
+      tmdbFetch(`movie/${id}/credits`),
+      tmdbFetch(`movie/${id}/videos`),
+      tmdbFetch(`movie/${id}/images`, { include_image_language: "null" }),
+    ]);
+
+    // Trailer finden (YouTube bevorzugt)
+    const vids = Array.isArray(videos?.results) ? videos.results : [];
+    const trailer =
+      vids.find(v => v.site === "YouTube" && v.type === "Trailer") ||
+      vids.find(v => v.site === "YouTube" && v.type === "Teaser") ||
+      null;
+
+    const poster = base.poster_path ? `https://image.tmdb.org/t/p/w342${base.poster_path}` : null;
+
+    const backs = Array.isArray(images?.backdrops) ? images.backdrops : [];
+    const posters = Array.isArray(images?.posters) ? images.posters : [];
+
+    const imageUrls = [
+      ...backs.slice(0, 8).map(x => x.file_path ? `https://image.tmdb.org/t/p/w780${x.file_path}` : null),
+      ...posters.slice(0, 6).map(x => x.file_path ? `https://image.tmdb.org/t/p/w342${x.file_path}` : null),
+    ].filter(Boolean);
+
+    return res.json({
+      ok: true,
+      movie: {
+        title: details?.title || base.title || title,
+        poster,
+        description: details?.overview || null,
+        runtime: details?.runtime ? `${details.runtime} Min` : null,
+        genres: (details?.genres || []).map(g => g.name),
+        cast: (credits?.cast || []).slice(0, 10).map(a => a.name),
+        trailer: trailer ? { site: trailer.site, key: trailer.key, name: trailer.name } : null,
+        images: imageUrls,
+      }
+    });
+  }catch(e){
+    return res.status(500).json({ ok:false, error:"Serverfehler", details:String(e?.message || e) });
+  }
+});
 app.listen(PORT, () => {
   console.log("Server läuft auf Port", PORT);
 });
