@@ -57,15 +57,25 @@ function toNumber(v) {
 const BLOCKED_WORDS = [
   "erotik",
   "sex",
-  "sextoy",
+  "sexy",
   "adult",
+  "porno",
+  "porn",
+  "blue movie",
   "bordell",
   "strip",
   "sauna club",
   "sauna",
   "massage",
   "escort",
+  "fkk",
+  "privatclub",
+  "peepshow",
   "erdbeermund",
+  "kino hole",
+  "hole kino",
+  "sexkino",
+  "adult kino"
 ];
 
 function isBlockedTitle(title) {
@@ -79,32 +89,36 @@ function isCinemaPlace(p) {
   const type = escStr(p?.type).toLowerCase();
   const category = escStr(p?.category).toLowerCase();
 
+  // ❌ Sofort raus wenn verdächtig
   if (isBlockedTitle(title)) return false;
 
-  const cinemaWords = [
-    "kino",
-    "cinema",
-    "cine",
-    "lichtspiel",
-    "filmpalast",
-    "metropolis",
-    "kinopolis",
-    "cineplex",
-    "cinestar",
+  // ✅ Muss ein echtes Kino sein
+  const allowedBrands = [
     "cinemaxx",
     "uci",
+    "cineplex",
+    "cinestar",
+    "kinopolis",
+    "filmpalast",
+    "metropolis",
+    "arthouse",
+    "lichtspiele",
+    "filmtheater"
   ];
 
-  const looksLikeCinemaByText = cinemaWords.some((w) => title.includes(w));
+  const looksLikeRealCinema =
+    allowedBrands.some(b => title.includes(b)) ||
+    title.includes("kino") ||
+    title.includes("cinema");
+
   const looksLikeCinemaByCategory =
     category.includes("movie") ||
     category.includes("cinema") ||
     type.includes("movie") ||
     type.includes("cinema");
 
-  return looksLikeCinemaByText || looksLikeCinemaByCategory;
+  return looksLikeRealCinema && looksLikeCinemaByCategory;
 }
-
 function normalizeCinema(p) {
   return {
     title: p?.title || p?.name || "Kino",
