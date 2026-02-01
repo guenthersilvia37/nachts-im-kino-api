@@ -373,7 +373,23 @@ app.get("/api/showtimes", async (req, res) => {
     return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
 });
+// ✅ NEU: GET /api/movie?title=...
+// -> liefert TMDB Infos (poster, description, runtime, genres, cast)
+app.get("/api/movie", async (req, res) => {
+  try{
+    const title = (req.query.title || "").toString().trim();
+    if(!title) return res.status(400).json({ ok:false, error:"title fehlt" });
 
+    if (!TMDB_KEY) {
+      return res.status(500).json({ ok:false, error:"TMDB_KEY fehlt (in Render/ENV setzen)" });
+    }
+
+    const movie = await tmdbMovieByTitle(title);
+    return res.json({ ok:true, movie: movie || null });
+  }catch(e){
+    return res.status(500).json({ ok:false, error:"Serverfehler", details:String(e?.message || e) });
+  }
+});
 app.listen(PORT, () => {
   console.log("Server läuft auf Port", PORT);
 });
