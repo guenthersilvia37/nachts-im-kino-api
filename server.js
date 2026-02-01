@@ -87,7 +87,9 @@ function isBlockedTitle(title) {
 // --------------------
 const CINEMA_WORDS = [
   "kino",
+  "kinos",
   "cinema",
+  "cine",            // ✅ wichtig für Cinedom etc.
   "movie theater",
   "movie theatre",
   "filmtheater",
@@ -96,9 +98,11 @@ const CINEMA_WORDS = [
   "programmkino",
   "arthouse",
   "filmkunst",
+  "kinocenter",
 ];
 
 const CINEMA_BRANDS = [
+  "cinedom",         // ✅ explizit
   "cinemaxx",
   "uci",
   "cineplex",
@@ -139,23 +143,17 @@ function isCinemaPlace(p) {
   // 1) Adult/Noise sofort raus
   if (isBlockedTitle(title)) return false;
 
-  // 2) Orte, die eher Clubs/Bars sind, raus (zusätzliche Sicherheit)
-  if (BAD_VENUE_WORDS.some((w) => title.includes(w))) {
-    // aber: wenn es eindeutig eine bekannte Kinokette ist, trotzdem erlauben
-    const isBrand = CINEMA_BRANDS.some((b) => title.includes(b));
-    if (!isBrand) return false;
-  }
+  // 2) Kategorie/Type ist am stärksten (wenn vorhanden)
+  const byCat = looksLikeCinemaByCategory(p);
 
-  // 3) Kino-Signale
+  // 3) Textsignal
   const byText =
     CINEMA_BRANDS.some((b) => title.includes(b)) ||
     CINEMA_WORDS.some((w) => title.includes(w));
 
-  const byCat = looksLikeCinemaByCategory(p);
-
-  // ✅ Regel: Kategorie ODER Textsignal muss passen, besser beides
-  // aber wenn SerpApi die Kategorie nicht liefert, reicht Textsignal
-  return byText || byCat;
+  // ✅ Wenn Kategorie passt -> Kino, auch wenn Name ungewöhnlich ist
+  // ✅ Wenn Kategorie fehlt -> Textsignal reicht
+  return byCat || byText;
 }
 
 function normalizeCinema(p) {
