@@ -10,6 +10,20 @@ const SERPAPI_KEY = (process.env.SERPAPI_KEY || "").trim();
 const TMDB_KEY = (process.env.TMDB_KEY || "").trim();
 
 // --------------------
+// ✅ fetch Fix (Node < 18)
+// --------------------
+let _fetch = globalThis.fetch;
+if (!_fetch) {
+  try {
+    const mod = await import("node-fetch");
+    _fetch = mod.default;
+    console.log("✅ node-fetch geladen (Node < 18)");
+  } catch (e) {
+    console.error("❌ Kein fetch verfügbar. Installiere node-fetch:", e);
+  }
+}
+
+// --------------------
 // CORS
 // --------------------
 app.use((req, res, next) => {
@@ -53,7 +67,7 @@ function pickCity(geoItem, fallback) {
 }
 
 // --------------------
-// Blocklist: Adult / Erotik / Noise (hart)
+// Blocklist
 // --------------------
 const BLOCKED_WORDS = [
   "erotik",
@@ -138,7 +152,6 @@ function isCinemaPlace(p) {
     CINEMA_BRANDS.some((b) => title.includes(b)) ||
     CINEMA_WORDS.some((w) => title.includes(w));
 
-  // wenn nach Club/Bar klingt und keine Kino-Signale hat -> raus
   const looksBad = BAD_VENUE_WORDS.some((w) => title.includes(w));
   if (looksBad && !byCat && !byText) return false;
 
@@ -167,7 +180,7 @@ async function nominatimSearch(q) {
     "https://nominatim.openstreetmap.org/search?format=json&limit=1&addressdetails=1&q=" +
     encodeURIComponent(q);
 
-  const r = await fetch(url, {
+  const r = await _fetch(url, {
     headers: { "User-Agent": "nachts-im-kino/1.0 (render)" },
   });
 
@@ -176,8 +189,8 @@ async function nominatimSearch(q) {
 }
 
 // --------------------
-// SerpApi: Google Maps
-// ✅ FIX: location + google_domain + mehr Ergebnis-Felder
+// SerpApi: Google Maps (Kinos)
+// ✅ FIX: type=search + location ist wichtig
 // --------------------
 async function serpApiGoogleMaps({ city, lat, lon }) {
   if (!SERPAPI_KEY)
@@ -185,19 +198,17 @@ async function serpApiGoogleMaps({ city, lat, lon }) {
 
   const url = new URL("https://serpapi.com/search.json");
   url.searchParams.set("engine", "google_maps");
+  url.searchParams.set("type", "search"); // ✅ wichtig
   url.searchParams.set("q", `Kino in ${city}`);
   url.searchParams.set("hl", "de");
   url.searchParams.set("gl", "de");
   url.searchParams.set("google_domain", "google.de");
-
-  // ✅ extrem wichtig: ohne location gibt es oft 0 results
-  url.searchParams.set("location", `${city}, Germany`);
-
+  url.searchParams.set("location", `${city}, Germany`); // ✅ wichtig
   url.searchParams.set("api_key", SERPAPI_KEY);
 
   if (lat && lon) url.searchParams.set("ll", `@${lat},${lon},12z`);
 
-  const r = await fetch(url.toString());
+  const r = await _fetch(url.toString());
   const data = await r.json().catch(() => null);
 
   if (!r.ok) return { ok: false, status: r.status, data };
@@ -205,193 +216,62 @@ async function serpApiGoogleMaps({ city, lat, lon }) {
 }
 
 // --------------------
-// SerpApi: Showtimes Block (Google Search)
+// ✅ DEBUG Endpoint (zeigt dir exakt, was SerpApi liefert)
 // --------------------
-async function serpApiShowtimes({ cinemaName, city }) {
-  if (!SERPAPI_KEY)
-    return { ok: false, status: 500, data: { error: "SERPAPI_KEY fehlt" } };
+app.get("/api/debug/cinemas", async (req, res) => {
+  try {
+    const q = (req.query.q || "").toString().trim() || "Köln";
 
-  const url = new URL("https://serpapi.com/search.json");
-  url.searchParams.set("engine", "google");
-  url.searchParams.set("q", `${cinemaName} Spielzeiten ${city}`);
-  url.searchParams.set("location", `${city}, Germany`);
-  url.searchParams.set("hl", "de");
-  url.searchParams.set("gl", "de");
-  url.searchParams.set("google_domain", "google.de");
-  url.searchParams.set("api_key", SERPAPI_KEY);
+    const geo = await nominatimSearch(q);
+    const city = geo.length ? pickCity(geo[0], q) : q;
+    const lat = geo.length ? toNumber(geo[0].lat) : null;
+    const lon = geo.length ? toNumber(geo[0].lon) : null;
 
-  const r = await fetch(url.toString());
-  const data = await r.json().catch(() => null);
+    const result = await serpApiGoogleMaps({ city, lat, lon });
+    const data = result.data || {};
 
-  if (!r.ok) return { ok: false, status: r.status, data };
-  return { ok: true, status: 200, data };
-}
+    // mögliche Felder
+    const rawCandidates = {
+      local_results: data?.local_results,
+      place_results: data?.place_results,
+      places: data?.places,
+    };
 
-// --------------------
-// Showtimes normalisieren
-// --------------------
-function normalizeShowtimes(showtimesArr) {
-  const days = [];
+    const pickAny =
+      data?.local_results ||
+      data?.place_results ||
+      data?.places ||
+      [];
 
-  for (const d of showtimesArr || []) {
-    const dayLabel = d?.day || "";
-    const dateLabel = d?.date || "";
+    const arr = Array.isArray(pickAny) ? pickAny : [];
+    const sample = arr[0] || null;
 
-    const movies = [];
-    for (const m of d?.movies || []) {
-      const title = (m?.name || m?.title || "").trim();
-      if (!title) continue;
-
-      const times = [];
-      for (const s of m?.showing || []) {
-        for (const t of s?.time || []) times.push(t);
-      }
-      const uniqTimes = [...new Set(times)].filter(Boolean);
-
-      movies.push({
-        title,
-        times: uniqTimes,
-        poster: m?.thumbnail || m?.poster || null,
-        info: { description: null, runtime: null, genres: [], cast: [] },
-      });
-    }
-
-    days.push({ day: dayLabel, date: dateLabel, movies });
+    res.json({
+      ok: true,
+      serp_ok: result.ok,
+      serp_status: result.status,
+      city,
+      keys: Object.keys(data || {}),
+      candidates_types: {
+        local_results: Array.isArray(rawCandidates.local_results) ? "array" : typeof rawCandidates.local_results,
+        place_results: Array.isArray(rawCandidates.place_results) ? "array" : typeof rawCandidates.place_results,
+        places: Array.isArray(rawCandidates.places) ? "array" : typeof rawCandidates.places,
+      },
+      raw_count: arr.length,
+      sample_title: sample?.title || sample?.name || null,
+      sample_category: sample?.category || null,
+      sample_type: sample?.type || null,
+      sample_full: sample,
+      note:
+        "Wenn raw_count 0 ist: SerpApi liefert nichts (Quota/Location/Key). Wenn raw_count >0 aber cinemas 0 -> Filter zu streng.",
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
-
-  return days;
-}
-
-// --------------------
-// TMDB helpers
-// --------------------
-async function tmdbFetch(path, params = {}) {
-  if (!TMDB_KEY) return null;
-
-  const url = new URL(`https://api.themoviedb.org/3/${path}`);
-  url.searchParams.set("api_key", TMDB_KEY);
-  url.searchParams.set("language", "de-DE");
-
-  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-
-  const r = await fetch(url.toString());
-  if (!r.ok) return null;
-  return r.json();
-}
-
-// Titel säubern
-function cleanMovieTitle(t) {
-  return escStr(t)
-    .split("–")[0]
-    .split("-")[0]
-    .replace(/\(.*?\)/g, "")
-    .replace(/\b(ov|omu|3d|imax|dolby|atmos|df|d-?box)\b/gi, "")
-    .replace(/\s{2,}/g, " ")
-    .trim();
-}
-
-// Robuster Lookup: mehrere Query-Varianten
-async function tmdbSearchBestMatch(rawTitle) {
-  if (!TMDB_KEY) return null;
-
-  const variants = [];
-  const a = escStr(rawTitle).trim();
-  const b = cleanMovieTitle(a);
-
-  if (a) variants.push(a);
-  if (b && b !== a) variants.push(b);
-  if (b.includes(":")) variants.push(b.split(":")[0].trim());
-
-  for (const q of variants) {
-    const search = await tmdbFetch("search/movie", { query: q });
-    const movie = search?.results?.[0];
-    if (movie?.id) return movie;
-  }
-  return null;
-}
-
-async function tmdbMovieByTitle(title) {
-  if (!TMDB_KEY || !title) return null;
-
-  const movie = await tmdbSearchBestMatch(title);
-  if (!movie?.id) return null;
-
-  const [details, credits, videos, images] = await Promise.all([
-    tmdbFetch(`movie/${movie.id}`),
-    tmdbFetch(`movie/${movie.id}/credits`),
-    tmdbFetch(`movie/${movie.id}/videos`),
-    tmdbFetch(`movie/${movie.id}/images`, { include_image_language: "de,null" }),
-  ]);
-
-  const poster = movie.poster_path
-    ? `https://image.tmdb.org/t/p/w342${movie.poster_path}`
-    : null;
-
-  const vids = Array.isArray(videos?.results) ? videos.results : [];
-  const yt = vids.filter((v) => (v.site || "").toLowerCase() === "youtube");
-  const trailer =
-    yt.find((v) => v.type === "Trailer" && v.official) ||
-    yt.find((v) => v.type === "Trailer") ||
-    yt.find((v) => v.type === "Teaser") ||
-    null;
-
-  const trailerKey = trailer?.key || null;
-
-  const backdrops = Array.isArray(images?.backdrops) ? images.backdrops : [];
-  const posters = Array.isArray(images?.posters) ? images.posters : [];
-
-  const imageUrls = backdrops
-    .slice(0, 10)
-    .map((i) => i?.file_path)
-    .filter(Boolean)
-    .map((p) => `https://image.tmdb.org/t/p/w780${p}`);
-
-  const posterUrls = posters
-    .slice(0, 8)
-    .map((i) => i?.file_path)
-    .filter(Boolean)
-    .map((p) => `https://image.tmdb.org/t/p/w500${p}`);
-
-  return {
-    title: details?.title || movie?.title || title,
-    poster,
-    description: details?.overview || null,
-    runtime: details?.runtime ? `${details.runtime} Min` : null,
-    genres: (details?.genres || []).map((g) => g.name),
-    cast: (credits?.cast || []).slice(0, 6).map((a) => a.name),
-    trailerKey,
-    images: imageUrls.length ? imageUrls : posterUrls,
-  };
-}
-
-// --------------------
-// In-memory cache (TMDB) - NICHT null cachen
-// --------------------
-const memCache = new Map(); // key -> {t,v}
-const CACHE_TTL_MS = 1000 * 60 * 60 * 12;
-
-function cacheGet(key) {
-  const e = memCache.get(key);
-  if (!e) return undefined;
-  if (Date.now() - e.t > CACHE_TTL_MS) {
-    memCache.delete(key);
-    return undefined;
-  }
-  return e.v;
-}
-
-function cacheSet(key, v) {
-  if (!v) return;
-  memCache.set(key, { t: Date.now(), v });
-}
-
-function tmdbCacheKey(title) {
-  return `tmdb::${cleanMovieTitle(title)}`.toLowerCase();
-}
+});
 
 // --------------------
 // GET /api/cinemas?q=...
-// ✅ FIX: raw-feld + Debug Infos
 // --------------------
 app.get("/api/cinemas", async (req, res) => {
   try {
@@ -415,18 +295,17 @@ app.get("/api/cinemas", async (req, res) => {
         .status(result.status)
         .json({ ok: false, error: "SerpApi Fehler", details: result.data });
 
-    // ✅ SerpApi variiert stark – deshalb viele Fallbacks
+    const data = result.data || {};
+
     const raw =
-      result.data?.local_results ||
-      result.data?.place_results ||
-      result.data?.places ||
-      result.data?.local_results?.places ||
-      result.data?.place_results?.places ||
+      data?.local_results ||
+      data?.place_results ||
+      data?.places ||
       [];
 
-    const rawCount = Array.isArray(raw) ? raw.length : 0;
+    const rawArr = Array.isArray(raw) ? raw : [];
 
-    const cinemas = (Array.isArray(raw) ? raw : [])
+    const cinemas = rawArr
       .filter(isCinemaPlace)
       .map(normalizeCinema)
       .filter((c) => c?.title && !isBlockedTitle(c.title));
@@ -435,151 +314,8 @@ app.get("/api/cinemas", async (req, res) => {
       ok: true,
       resolved_city: city,
       coords_used: lat && lon ? { lat, lon } : null,
-
-      // ✅ Debug (hilft dir sofort zu sehen, was los ist)
-      debug_raw_count: rawCount,
-      debug_after_filter_count: cinemas.length,
-      debug_sample_titles: cinemas.slice(0, 6).map((x) => x.title),
-
       cinemas,
     });
-  } catch (e) {
-    return res
-      .status(500)
-      .json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
-  }
-});
-
-// --------------------
-// GET /api/showtimes?name=...&city=...
-// --------------------
-app.get("/api/showtimes", async (req, res) => {
-  try {
-    if (!SERPAPI_KEY)
-      return res.status(500).json({ ok: false, error: "SERPAPI_KEY fehlt" });
-
-    const name = (req.query.name || "").toString().trim();
-    const city = (req.query.city || "").toString().trim();
-    if (!name) return res.status(400).json({ ok: false, error: "name fehlt" });
-    if (!city) return res.status(400).json({ ok: false, error: "city fehlt" });
-
-    if (isBlockedTitle(name))
-      return res.status(400).json({ ok: false, error: "Dieses Kino ist blockiert." });
-
-    const result = await serpApiShowtimes({ cinemaName: name, city });
-    if (!result.ok)
-      return res
-        .status(result.status)
-        .json({ ok: false, error: "SerpApi Fehler", details: result.data });
-
-    const showtimesArr = result.data?.showtimes || [];
-    const days = normalizeShowtimes(showtimesArr);
-
-    // TMDB enrich (limitiert)
-    if (TMDB_KEY) {
-      const MAX_ENRICH = 12;
-      const uniqTitles = [];
-
-      for (const d of days) {
-        for (const m of d.movies || []) {
-          const t = (m.title || "").trim();
-          if (!t) continue;
-          if (isBlockedTitle(t)) continue;
-          if (!uniqTitles.includes(t)) uniqTitles.push(t);
-          if (uniqTitles.length >= MAX_ENRICH) break;
-        }
-        if (uniqTitles.length >= MAX_ENRICH) break;
-      }
-
-      const infoMap = new Map();
-      await Promise.all(
-        uniqTitles.map(async (t) => {
-          const ck = tmdbCacheKey(t);
-          const cached = cacheGet(ck);
-          if (cached) {
-            infoMap.set(t, cached);
-            return;
-          }
-          const info = await tmdbMovieByTitle(t);
-          if (info) cacheSet(ck, info);
-          infoMap.set(t, info || null);
-        })
-      );
-
-      for (const d of days) {
-        for (const m of d.movies || []) {
-          const info = infoMap.get((m.title || "").trim());
-          if (!info) continue;
-
-          if (!m.poster && info.poster) m.poster = info.poster;
-
-          m.info = {
-            description: info.description || null,
-            runtime: info.runtime || null,
-            genres: info.genres || [],
-            cast: info.cast || [],
-          };
-        }
-      }
-    }
-
-    return res.json({
-      ok: true,
-      cinema: name,
-      city,
-      days,
-      raw_has_showtimes: Array.isArray(showtimesArr) && showtimesArr.length > 0,
-    });
-  } catch (e) {
-    return res
-      .status(500)
-      .json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
-  }
-});
-
-// --------------------
-// GET /api/movie?title=...
-// --------------------
-app.get("/api/movie", async (req, res) => {
-  try {
-    const title = (req.query.title || "").toString().trim();
-    if (!title) return res.status(400).json({ ok: false, error: "title fehlt" });
-    if (isBlockedTitle(title)) return res.json({ ok: true, movie: null, reason: "blocked" });
-    if (!TMDB_KEY) return res.json({ ok: true, movie: null, reason: "tmdb_key_missing" });
-
-    const ck = tmdbCacheKey(title);
-    const cached = cacheGet(ck);
-    if (cached) return res.json({ ok: true, movie: cached });
-
-    const movie = await tmdbMovieByTitle(title);
-    if (movie) cacheSet(ck, movie);
-
-    return res.json({ ok: true, movie: movie || null, reason: movie ? null : "not_found" });
-  } catch (e) {
-    return res
-      .status(500)
-      .json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
-  }
-});
-
-// --------------------
-// GET /api/poster?title=...
-// --------------------
-app.get("/api/poster", async (req, res) => {
-  try {
-    const title = (req.query.title || "").toString().trim();
-    if (!title) return res.status(400).json({ ok: false, error: "title fehlt" });
-    if (isBlockedTitle(title)) return res.json({ ok: true, poster: null });
-    if (!TMDB_KEY) return res.json({ ok: true, poster: null, reason: "tmdb_key_missing" });
-
-    const ck = tmdbCacheKey(title);
-    const cached = cacheGet(ck);
-    if (cached?.poster) return res.json({ ok: true, poster: cached.poster });
-
-    const movie = await tmdbMovieByTitle(title);
-    if (movie) cacheSet(ck, movie);
-
-    return res.json({ ok: true, poster: movie?.poster || null });
   } catch (e) {
     return res
       .status(500)
