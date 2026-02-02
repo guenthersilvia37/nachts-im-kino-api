@@ -294,29 +294,61 @@ function cleanMovieTitle(t) {
 async function tmdbMovieByTitle(title) {
   if (!TMDB_KEY || !title) return null;
 
-  const cleaned = cleanMovieTitle(title);
-  if (!cleaned) return null;
-
-  const search = await tmdbFetch("search/movie", { query: cleaned });
+  const search = await tmdbFetch("search/movie", { query: title });
   const movie = search?.results?.[0];
   if (!movie?.id) return null;
 
-  const [details, credits] = await Promise.all([
+  const [details, credits, videos, images] = await Promise.all([
     tmdbFetch(`movie/${movie.id}`),
     tmdbFetch(`movie/${movie.id}/credits`),
+    tmdbFetch(`movie/${movie.id}/videos`),
+    tmdbFetch(`movie/${movie.id}/images`, { include_image_language: "de,null" }),
   ]);
 
   const poster = movie.poster_path
     ? `https://image.tmdb.org/t/p/w342${movie.poster_path}`
     : null;
 
+  // Trailer: am liebsten YouTube Trailer (official), sonst irgendein Trailer/Teaser
+  const vids = Array.isArray(videos?.results) ? videos.results : [];
+  const yt = vids.filter(v => (v.site || "").toLowerCase() === "youtube");
+  const trailer =
+    yt.find(v => (v.type === "Trailer" && v.official)) ||
+    yt.find(v => v.type === "Trailer") ||
+    yt.find(v => v.type === "Teaser") ||
+    null;
+
+  const trailerKey = trailer?.key || null;
+
+  // Bilder: Backdrops bevorzugt
+  const backdrops = Array.isArray(images?.backdrops) ? images.backdrops : [];
+  const posters = Array.isArray(images?.posters) ? images.posters : [];
+
+  // ein paar schöne Backdrops nehmen (max 10)
+  const imageUrls = backdrops
+    .slice(0, 10)
+    .map(i => i?.file_path)
+    .filter(Boolean)
+    .map(p => `https://image.tmdb.org/t/p/w780${p}`);
+
+  // fallback: falls keine Backdrops da sind, nimm Poster (max 8)
+  const posterUrls = posters
+    .slice(0, 8)
+    .map(i => i?.file_path)
+    .filter(Boolean)
+    .map(p => `https://image.tmdb.org/t/p/w500${p}`);
+
   return {
-    title: details?.title || cleaned,
+    title: details?.title || title,
     poster,
     description: details?.overview || null,
     runtime: details?.runtime ? `${details.runtime} Min` : null,
     genres: (details?.genres || []).map((g) => g.name),
     cast: (credits?.cast || []).slice(0, 6).map((a) => a.name),
+
+    // ✅ neu:
+    trailerKey,                 // YouTube key für iframe
+    images: imageUrls.length ? imageUrls : posterUrls, // Galerie-URLs
   };
 }
 
