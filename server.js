@@ -402,7 +402,11 @@ app.get("/api/cinemas", async (req, res) => {
     const result = await serpApiGoogleMaps({ city, lat, lon });
     if (!result.ok) return res.status(result.status).json({ ok: false, error: "SerpApi Fehler", details: result.data });
 
-    const raw = result.data?.local_results || result.data?.place_results || [];
+    const raw =
+  result.data?.local_results ||
+  result.data?.place_results ||
+  result.data?.places ||   // ✅ DAS FEHLT BEI DIR
+  [];
     const cinemas = raw
       .filter(isCinemaPlace)
       .map(normalizeCinema)
