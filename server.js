@@ -89,7 +89,7 @@ const CINEMA_WORDS = [
   "kino",
   "kinos",
   "cinema",
-  "cine",            // ✅ wichtig für Cinedom etc.
+  "cine", // ✅ wichtig für Cinedom etc.
   "movie theater",
   "movie theatre",
   "filmtheater",
@@ -102,7 +102,7 @@ const CINEMA_WORDS = [
 ];
 
 const CINEMA_BRANDS = [
-  "cinedom",         // ✅ explizit
+  "cinedom",
   "cinemaxx",
   "uci",
   "cineplex",
@@ -112,15 +112,9 @@ const CINEMA_BRANDS = [
   "metropolis",
 ];
 
-const BAD_VENUE_WORDS = [
-  "club",
-  "bar",
-  "lounge",
-  "bordell",
-  "sauna",
-  "massage",
-  "studio",
-];
+// Extra Filter für Orte, die oft KEIN Kino sind
+// (nur blocken, wenn KEINE Kino-Signale im Namen sind)
+const BAD_VENUE_WORDS = ["club", "bar", "lounge", "massage", "sauna", "bordell"];
 
 // SerpApi google_maps liefert manchmal: type/category = "movie_theater"
 function looksLikeCinemaByCategory(p) {
@@ -136,23 +130,20 @@ function looksLikeCinemaByCategory(p) {
   );
 }
 
-// Haupt-Check
 function isCinemaPlace(p) {
   const title = escStr(p?.title || p?.name).toLowerCase();
 
-  // 1) Adult/Noise sofort raus
   if (isBlockedTitle(title)) return false;
 
-  // 2) Kategorie/Type ist am stärksten (wenn vorhanden)
   const byCat = looksLikeCinemaByCategory(p);
-
-  // 3) Textsignal
   const byText =
     CINEMA_BRANDS.some((b) => title.includes(b)) ||
     CINEMA_WORDS.some((w) => title.includes(w));
 
-  // ✅ Wenn Kategorie passt -> Kino, auch wenn Name ungewöhnlich ist
-  // ✅ Wenn Kategorie fehlt -> Textsignal reicht
+  // ✅ Wenn es nach Club/Bar klingt UND keine Kino-Signale hat -> raus
+  const looksBad = BAD_VENUE_WORDS.some((w) => title.includes(w));
+  if (looksBad && !byCat && !byText) return false;
+
   return byCat || byText;
 }
 
@@ -291,10 +282,22 @@ async function tmdbFetch(path, params = {}) {
   return r.json();
 }
 
+// Titel etwas säubern (erhöht Trefferquote)
+function cleanMovieTitle(t) {
+  return escStr(t)
+    .replace(/\(.*?\)/g, "")      // (OV), (3D), (DF) ...
+    .replace(/\b(ov|omu|3d|imax|dolby|atmos|df)\b/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 async function tmdbMovieByTitle(title) {
   if (!TMDB_KEY || !title) return null;
 
-  const search = await tmdbFetch("search/movie", { query: title });
+  const cleaned = cleanMovieTitle(title);
+  if (!cleaned) return null;
+
+  const search = await tmdbFetch("search/movie", { query: cleaned });
   const movie = search?.results?.[0];
   if (!movie?.id) return null;
 
@@ -308,7 +311,7 @@ async function tmdbMovieByTitle(title) {
     : null;
 
   return {
-    title: details?.title || title,
+    title: details?.title || cleaned,
     poster,
     description: details?.overview || null,
     runtime: details?.runtime ? `${details.runtime} Min` : null,
@@ -319,20 +322,23 @@ async function tmdbMovieByTitle(title) {
 
 // --------------------
 // Simple in-memory cache (TMDB)
+// ✅ Wichtig: wir cachen NICHT "null"!
 // --------------------
 const memCache = new Map(); // key -> {t,v}
 const CACHE_TTL_MS = 1000 * 60 * 60 * 12; // 12h
 
 function cacheGet(key) {
   const e = memCache.get(key);
-  if (!e) return null;
+  if (!e) return undefined;
   if (Date.now() - e.t > CACHE_TTL_MS) {
     memCache.delete(key);
-    return null;
+    return undefined;
   }
   return e.v;
 }
+
 function cacheSet(key, v) {
+  if (!v) return; // ✅ niemals null/undefined cachen
   memCache.set(key, { t: Date.now(), v });
 }
 
@@ -361,7 +367,7 @@ app.get("/api/cinemas", async (req, res) => {
     const cinemas = raw
       .filter(isCinemaPlace)
       .map(normalizeCinema)
-      .filter((c) => !isBlockedTitle(c.title));
+      .filter((c) => c?.title && !isBlockedTitle(c.title));
 
     return res.json({
       ok: true,
@@ -413,16 +419,16 @@ app.get("/api/showtimes", async (req, res) => {
     const infoMap = new Map();
     await Promise.all(
       uniqTitles.map(async (t) => {
-        const ck = `tmdb::${t}`.toLowerCase();
+        const ck = `tmdb::${cleanMovieTitle(t)}`.toLowerCase();
         const cached = cacheGet(ck);
-        if (cached !== null) {
+        if (cached) {
           infoMap.set(t, cached);
           return;
         }
 
         const info = await tmdbMovieByTitle(t);
-        cacheSet(ck, info);
-        infoMap.set(t, info);
+        if (info) cacheSet(ck, info); // ✅ nur wenn info existiert
+        infoMap.set(t, info || null);
       })
     );
 
@@ -462,17 +468,25 @@ app.get("/api/movie", async (req, res) => {
   try {
     const title = (req.query.title || "").toString().trim();
     if (!title) return res.status(400).json({ ok: false, error: "title fehlt" });
-    if (isBlockedTitle(title)) return res.json({ ok: true, movie: null });
+    if (isBlockedTitle(title)) return res.json({ ok: true, movie: null, reason: "blocked" });
 
-    if (!TMDB_KEY) return res.json({ ok: true, movie: null, hint: "TMDB_KEY fehlt" });
+    if (!TMDB_KEY) return res.json({ ok: true, movie: null, reason: "tmdb_key_missing" });
 
-    const ck = `tmdb::${title}`.toLowerCase();
+    const cleaned = cleanMovieTitle(title);
+    const ck = `tmdb::${cleaned}`.toLowerCase();
+
     const cached = cacheGet(ck);
-    if (cached !== null) return res.json({ ok: true, movie: cached });
+    if (cached) return res.json({ ok: true, movie: cached });
 
     const movie = await tmdbMovieByTitle(title);
-    cacheSet(ck, movie);
-    return res.json({ ok: true, movie });
+
+    if (movie) cacheSet(ck, movie); // ✅ niemals null cachen
+
+    return res.json({
+      ok: true,
+      movie: movie || null,
+      reason: movie ? null : "not_found",
+    });
   } catch (e) {
     return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
@@ -488,14 +502,16 @@ app.get("/api/poster", async (req, res) => {
     if (!title) return res.status(400).json({ ok: false, error: "title fehlt" });
     if (isBlockedTitle(title)) return res.json({ ok: true, poster: null });
 
-    if (!TMDB_KEY) return res.json({ ok: true, poster: null, hint: "TMDB_KEY fehlt" });
+    if (!TMDB_KEY) return res.json({ ok: true, poster: null, reason: "tmdb_key_missing" });
 
-    const ck = `tmdb::${title}`.toLowerCase();
+    const cleaned = cleanMovieTitle(title);
+    const ck = `tmdb::${cleaned}`.toLowerCase();
+
     const cached = cacheGet(ck);
-    if (cached && cached.poster) return res.json({ ok: true, poster: cached.poster });
+    if (cached?.poster) return res.json({ ok: true, poster: cached.poster });
 
     const movie = await tmdbMovieByTitle(title);
-    cacheSet(ck, movie);
+    if (movie) cacheSet(ck, movie); // ✅ niemals null cachen
 
     return res.json({ ok: true, poster: movie?.poster || null });
   } catch (e) {
