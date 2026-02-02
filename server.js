@@ -138,6 +138,7 @@ function isCinemaPlace(p) {
     CINEMA_BRANDS.some((b) => title.includes(b)) ||
     CINEMA_WORDS.some((w) => title.includes(w));
 
+  // wenn nach Club/Bar klingt und keine Kino-Signale hat -> raus
   const looksBad = BAD_VENUE_WORDS.some((w) => title.includes(w));
   if (looksBad && !byCat && !byText) return false;
 
@@ -176,15 +177,22 @@ async function nominatimSearch(q) {
 
 // --------------------
 // SerpApi: Google Maps
+// ✅ FIX: location + google_domain + mehr Ergebnis-Felder
 // --------------------
 async function serpApiGoogleMaps({ city, lat, lon }) {
-  if (!SERPAPI_KEY) return { ok: false, status: 500, data: { error: "SERPAPI_KEY fehlt" } };
+  if (!SERPAPI_KEY)
+    return { ok: false, status: 500, data: { error: "SERPAPI_KEY fehlt" } };
 
   const url = new URL("https://serpapi.com/search.json");
   url.searchParams.set("engine", "google_maps");
   url.searchParams.set("q", `Kino in ${city}`);
   url.searchParams.set("hl", "de");
   url.searchParams.set("gl", "de");
+  url.searchParams.set("google_domain", "google.de");
+
+  // ✅ extrem wichtig: ohne location gibt es oft 0 results
+  url.searchParams.set("location", `${city}, Germany`);
+
   url.searchParams.set("api_key", SERPAPI_KEY);
 
   if (lat && lon) url.searchParams.set("ll", `@${lat},${lon},12z`);
@@ -200,7 +208,8 @@ async function serpApiGoogleMaps({ city, lat, lon }) {
 // SerpApi: Showtimes Block (Google Search)
 // --------------------
 async function serpApiShowtimes({ cinemaName, city }) {
-  if (!SERPAPI_KEY) return { ok: false, status: 500, data: { error: "SERPAPI_KEY fehlt" } };
+  if (!SERPAPI_KEY)
+    return { ok: false, status: 500, data: { error: "SERPAPI_KEY fehlt" } };
 
   const url = new URL("https://serpapi.com/search.json");
   url.searchParams.set("engine", "google");
@@ -273,9 +282,9 @@ async function tmdbFetch(path, params = {}) {
 // Titel säubern
 function cleanMovieTitle(t) {
   return escStr(t)
-    .split("–")[0]                 // "Titel – Zusatz" -> "Titel"
-    .split("-")[0]                 // optional: "Titel - Zusatz"
-    .replace(/\(.*?\)/g, "")       // (OV), (3D)...
+    .split("–")[0]
+    .split("-")[0]
+    .replace(/\(.*?\)/g, "")
     .replace(/\b(ov|omu|3d|imax|dolby|atmos|df|d-?box)\b/gi, "")
     .replace(/\s{2,}/g, " ")
     .trim();
@@ -291,8 +300,6 @@ async function tmdbSearchBestMatch(rawTitle) {
 
   if (a) variants.push(a);
   if (b && b !== a) variants.push(b);
-
-  // zusätzliche Variante: ohne Doppelpunkt-Untertitel
   if (b.includes(":")) variants.push(b.split(":")[0].trim());
 
   for (const q of variants) {
@@ -384,30 +391,42 @@ function tmdbCacheKey(title) {
 
 // --------------------
 // GET /api/cinemas?q=...
+// ✅ FIX: raw-feld + Debug Infos
 // --------------------
 app.get("/api/cinemas", async (req, res) => {
   try {
-    if (!SERPAPI_KEY) return res.status(500).json({ ok: false, error: "SERPAPI_KEY fehlt" });
+    if (!SERPAPI_KEY)
+      return res.status(500).json({ ok: false, error: "SERPAPI_KEY fehlt" });
 
     const q = (req.query.q || "").toString().trim();
     if (!q) return res.status(400).json({ ok: false, error: "q fehlt" });
 
     const geo = await nominatimSearch(q);
-    if (!geo.length) return res.status(404).json({ ok: false, error: "Ort nicht gefunden" });
+    if (!geo.length)
+      return res.status(404).json({ ok: false, error: "Ort nicht gefunden" });
 
     const city = pickCity(geo[0], q);
     const lat = toNumber(geo[0].lat);
     const lon = toNumber(geo[0].lon);
 
     const result = await serpApiGoogleMaps({ city, lat, lon });
-    if (!result.ok) return res.status(result.status).json({ ok: false, error: "SerpApi Fehler", details: result.data });
+    if (!result.ok)
+      return res
+        .status(result.status)
+        .json({ ok: false, error: "SerpApi Fehler", details: result.data });
 
+    // ✅ SerpApi variiert stark – deshalb viele Fallbacks
     const raw =
-  result.data?.local_results ||
-  result.data?.place_results ||
-  result.data?.places ||   // ✅ DAS FEHLT BEI DIR
-  [];
-    const cinemas = raw
+      result.data?.local_results ||
+      result.data?.place_results ||
+      result.data?.places ||
+      result.data?.local_results?.places ||
+      result.data?.place_results?.places ||
+      [];
+
+    const rawCount = Array.isArray(raw) ? raw.length : 0;
+
+    const cinemas = (Array.isArray(raw) ? raw : [])
       .filter(isCinemaPlace)
       .map(normalizeCinema)
       .filter((c) => c?.title && !isBlockedTitle(c.title));
@@ -416,10 +435,18 @@ app.get("/api/cinemas", async (req, res) => {
       ok: true,
       resolved_city: city,
       coords_used: lat && lon ? { lat, lon } : null,
+
+      // ✅ Debug (hilft dir sofort zu sehen, was los ist)
+      debug_raw_count: rawCount,
+      debug_after_filter_count: cinemas.length,
+      debug_sample_titles: cinemas.slice(0, 6).map((x) => x.title),
+
       cinemas,
     });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
+    return res
+      .status(500)
+      .json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
 });
 
@@ -428,17 +455,22 @@ app.get("/api/cinemas", async (req, res) => {
 // --------------------
 app.get("/api/showtimes", async (req, res) => {
   try {
-    if (!SERPAPI_KEY) return res.status(500).json({ ok: false, error: "SERPAPI_KEY fehlt" });
+    if (!SERPAPI_KEY)
+      return res.status(500).json({ ok: false, error: "SERPAPI_KEY fehlt" });
 
     const name = (req.query.name || "").toString().trim();
     const city = (req.query.city || "").toString().trim();
     if (!name) return res.status(400).json({ ok: false, error: "name fehlt" });
     if (!city) return res.status(400).json({ ok: false, error: "city fehlt" });
 
-    if (isBlockedTitle(name)) return res.status(400).json({ ok: false, error: "Dieses Kino ist blockiert." });
+    if (isBlockedTitle(name))
+      return res.status(400).json({ ok: false, error: "Dieses Kino ist blockiert." });
 
     const result = await serpApiShowtimes({ cinemaName: name, city });
-    if (!result.ok) return res.status(result.status).json({ ok: false, error: "SerpApi Fehler", details: result.data });
+    if (!result.ok)
+      return res
+        .status(result.status)
+        .json({ ok: false, error: "SerpApi Fehler", details: result.data });
 
     const showtimesArr = result.data?.showtimes || [];
     const days = normalizeShowtimes(showtimesArr);
@@ -499,13 +531,14 @@ app.get("/api/showtimes", async (req, res) => {
       raw_has_showtimes: Array.isArray(showtimesArr) && showtimesArr.length > 0,
     });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
+    return res
+      .status(500)
+      .json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
 });
 
 // --------------------
 // GET /api/movie?title=...
-// -> volle Filmdetails (für film.html)
 // --------------------
 app.get("/api/movie", async (req, res) => {
   try {
@@ -523,13 +556,14 @@ app.get("/api/movie", async (req, res) => {
 
     return res.json({ ok: true, movie: movie || null, reason: movie ? null : "not_found" });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
+    return res
+      .status(500)
+      .json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
 });
 
 // --------------------
 // GET /api/poster?title=...
-// -> Poster-only (für schnelles Nachladen)
 // --------------------
 app.get("/api/poster", async (req, res) => {
   try {
@@ -547,7 +581,9 @@ app.get("/api/poster", async (req, res) => {
 
     return res.json({ ok: true, poster: movie?.poster || null });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
+    return res
+      .status(500)
+      .json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
 });
 
