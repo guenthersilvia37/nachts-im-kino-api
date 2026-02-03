@@ -1,14 +1,20 @@
 import express from "express";
 import dotenv from "dotenv";
 
-dotenv.config();
+// In Production auf Fly brauchst du dotenv nicht zwingend,
+// aber es schadet nicht lokal:
+if (process.env.NODE_ENV !== "production") {
+  dotenv.config();
+}
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-const SERPAPI_KEY = (process.env.SERPAPI_KEY || "").trim();
-const TMDB_KEY = (process.env.TMDB_KEY || "").trim();
+// WICHTIG: Fallback + Number
+const PORT = Number(process.env.PORT) || 3000;
 
+// Optional: damit du echte Crash-Ursachen in Logs siehst
+process.on("unhandledRejection", (err) => console.error("unhandledRejection:", err));
+process.on("uncaughtException", (err) => console.error("uncaughtException:", err));
 // --------------------
 // CORS
 // --------------------
@@ -550,8 +556,6 @@ app.get("/api/poster", async (req, res) => {
     return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
 });
-
-const PORT = Number(process.env.PORT) || 3000;
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log("Server läuft auf Port", PORT);
