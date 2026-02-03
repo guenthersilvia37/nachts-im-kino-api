@@ -196,23 +196,36 @@ async function serpApiGoogleMaps({ city, lat, lon }) {
   if (!SERPAPI_KEY) return { ok: false, status: 500, data: { error: "SERPAPI_KEY fehlt" } };
 
   const url = new URL("https://serpapi.com/search.json");
-
   url.searchParams.set("engine", "google_maps");
-  url.searchParams.set("type", "search");              // ⭐ WICHTIG
-  url.searchParams.set("q", "kino");                   // ⭐ NICHT "Kino in Köln"
-  url.searchParams.set("location", `${city}, Germany`);// ⭐ WICHTIG
+  url.searchParams.set("type", "search");
+  url.searchParams.set("q", "Kino"); // kurz + stabil
+  url.searchParams.set("location", `${city}, Germany`);
   url.searchParams.set("hl", "de");
   url.searchParams.set("gl", "de");
   url.searchParams.set("api_key", SERPAPI_KEY);
 
-  if (lat && lon) {
+  // ll macht manchmal Probleme -> nur setzen, wenn wir beide sauber haben
+  if (lat != null && lon != null) {
     url.searchParams.set("ll", `@${lat},${lon},13z`);
   }
 
   const r = await fetch(url.toString());
   const data = await r.json().catch(() => null);
 
-  if (!r.ok) return { ok: false, status: r.status, data };
+  // ⚠️ SerpApi liefert Fehler oft als JSON-Feld "error" obwohl HTTP 200 ist
+  const serpError =
+    data?.error ||
+    data?.search_metadata?.status === "Error" ||
+    data?.search_metadata?.status === "Failure";
+
+  if (!r.ok || serpError) {
+    return {
+      ok: false,
+      status: r.status || 500,
+      data,
+    };
+  }
+
   return { ok: true, status: 200, data };
 }
 
