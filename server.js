@@ -404,7 +404,7 @@ app.get("/api/cinemas", async (req, res) => {
     const lat = toNumber(geo[0].lat);
     const lon = toNumber(geo[0].lon);
 
-    const result = await serpApiGoogleMaps({ city, lat, lon });
+    const result = await serpApiGoogleMaps({ city });
     if (!result.ok) {
       return res.status(result.status).json({
         ok: false,
