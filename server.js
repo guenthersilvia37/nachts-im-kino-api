@@ -1,3 +1,5 @@
+import fetch from "node-fetch";
+global.fetch = fetch;
 import express from "express";
 import dotenv from "dotenv";
 
