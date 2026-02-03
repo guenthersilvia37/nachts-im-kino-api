@@ -33,12 +33,10 @@ app.get("/api/health", (req, res) =>
 function escStr(v) {
   return String(v ?? "");
 }
-
 function toNumber(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
-
 function pickCity(geoItem, fallback) {
   const a = geoItem?.address || {};
   return (
@@ -53,7 +51,7 @@ function pickCity(geoItem, fallback) {
 }
 
 // --------------------
-// Blocklist: Adult / Erotik / Noise
+// Blocklist: Adult / Erotik / Noise (hart)
 // --------------------
 const BLOCKED_WORDS = [
   "erotik",
@@ -167,7 +165,7 @@ async function nominatimSearch(q) {
     encodeURIComponent(q);
 
   const r = await fetch(url, {
-    headers: { "User-Agent": "nachts-im-kino/1.0 (render)" },
+    headers: { "User-Agent": "nachts-im-kino/1.0" },
   });
 
   if (!r.ok) return [];
@@ -175,29 +173,32 @@ async function nominatimSearch(q) {
 }
 
 // --------------------
-// SerpApi: Google Maps (ROBUST)
+// SerpApi: Google Maps (WICHTIG: location ODER ll, nie beides)
 // --------------------
-async function serpApiGoogleMaps({ city }) {
+async function serpApiGoogleMaps({ city, lat, lon }) {
   if (!SERPAPI_KEY) {
     return { ok: false, status: 500, data: { error: "SERPAPI_KEY fehlt" } };
   }
 
   const url = new URL("https://serpapi.com/search.json");
   url.searchParams.set("engine", "google_maps");
-  url.searchParams.set("type", "search");
-  url.searchParams.set("q", "Kino");
-  url.searchParams.set("location", `${city}, Germany`);
+  url.searchParams.set("q", `Kino in ${city}`);
   url.searchParams.set("hl", "de");
   url.searchParams.set("gl", "de");
   url.searchParams.set("api_key", SERPAPI_KEY);
 
+  // ✅ ENTWEDER ll ODER location
+  if (lat != null && lon != null) {
+    url.searchParams.set("ll", `@${lat},${lon},12z`);
+  } else {
+    url.searchParams.set("location", `${city}, Germany`);
+  }
+
   const r = await fetch(url.toString());
   const data = await r.json().catch(() => null);
 
-  if (!r.ok || data?.error) {
-    return { ok: false, status: r.status || 500, data };
-  }
-
+  if (!r.ok) return { ok: false, status: r.status, data };
+  if (data?.error) return { ok: false, status: 500, data }; // SerpApi kann error im body liefern
   return { ok: true, status: 200, data };
 }
 
@@ -205,7 +206,9 @@ async function serpApiGoogleMaps({ city }) {
 // SerpApi: Showtimes Block (Google Search)
 // --------------------
 async function serpApiShowtimes({ cinemaName, city }) {
-  if (!SERPAPI_KEY) return { ok: false, status: 500, data: { error: "SERPAPI_KEY fehlt" } };
+  if (!SERPAPI_KEY) {
+    return { ok: false, status: 500, data: { error: "SERPAPI_KEY fehlt" } };
+  }
 
   const url = new URL("https://serpapi.com/search.json");
   url.searchParams.set("engine", "google");
@@ -219,12 +222,8 @@ async function serpApiShowtimes({ cinemaName, city }) {
   const r = await fetch(url.toString());
   const data = await r.json().catch(() => null);
 
-  const serpError =
-    data?.error ||
-    data?.search_metadata?.status === "Error" ||
-    data?.search_metadata?.status === "Failure";
-
-  if (!r.ok || serpError) return { ok: false, status: r.status || 500, data };
+  if (!r.ok) return { ok: false, status: r.status, data };
+  if (data?.error) return { ok: false, status: 500, data };
   return { ok: true, status: 200, data };
 }
 
@@ -264,7 +263,7 @@ function normalizeShowtimes(showtimesArr) {
 }
 
 // --------------------
-// TMDB (wie gehabt, nur minimal)
+// TMDB helpers
 // --------------------
 async function tmdbFetch(path, params = {}) {
   if (!TMDB_KEY) return null;
@@ -272,6 +271,7 @@ async function tmdbFetch(path, params = {}) {
   const url = new URL(`https://api.themoviedb.org/3/${path}`);
   url.searchParams.set("api_key", TMDB_KEY);
   url.searchParams.set("language", "de-DE");
+
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
 
   const r = await fetch(url.toString());
@@ -281,9 +281,8 @@ async function tmdbFetch(path, params = {}) {
 
 function cleanMovieTitle(t) {
   return escStr(t)
-    .split("–")[0]
-    .split("-")[0]
-    .replace(/\(.*?\)/g, "")
+    .replace(/\s*[–-]\s*.*$/g, "") // alles nach " – " oder " - " weg
+    .replace(/\(.*?\)/g, "") // (OV), (3D)...
     .replace(/\b(ov|omu|3d|imax|dolby|atmos|df|d-?box)\b/gi, "")
     .replace(/\s{2,}/g, " ")
     .trim();
@@ -377,12 +376,10 @@ function cacheGet(key) {
   }
   return e.v;
 }
-
 function cacheSet(key, v) {
   if (!v) return;
   memCache.set(key, { t: Date.now(), v });
 }
-
 function tmdbCacheKey(title) {
   return `tmdb::${cleanMovieTitle(title)}`.toLowerCase();
 }
@@ -404,64 +401,28 @@ app.get("/api/cinemas", async (req, res) => {
     const lat = toNumber(geo[0].lat);
     const lon = toNumber(geo[0].lon);
 
-    const result = await serpApiGoogleMaps({ city });
-    if (!result.ok) {
-      return res.status(result.status).json({
-        ok: false,
-        error: "SerpApi Fehler",
-        details: result.data,
-      });
-    }
+    const result = await serpApiGoogleMaps({ city, lat, lon });
+    if (!result.ok) return res.status(result.status).json({ ok: false, error: "SerpApi Fehler", details: result.data });
 
-    const data = result.data || {};
-
-    // Super-Fallback für SerpApi Felder
-    const rawList =
-      data.local_results ||
-      data.places ||
-      data.place_results ||
-      data.local_results?.places ||
+    const raw =
+      result.data?.local_results ||
+      result.data?.place_results ||
+      result.data?.places ||
       [];
-
-    const raw = Array.isArray(rawList) ? rawList : rawList ? [rawList] : [];
-
-    const serpCounts = {
-      local_results: Array.isArray(data.local_results) ? data.local_results.length : 0,
-      places: Array.isArray(data.places) ? data.places.length : 0,
-      place_results: Array.isArray(data.place_results) ? data.place_results.length : (data.place_results ? 1 : 0),
-      raw: raw.length,
-    };
 
     const cinemas = raw
       .filter(isCinemaPlace)
       .map(normalizeCinema)
       .filter((c) => c?.title && !isBlockedTitle(c.title));
 
-    const debug = (req.query.debug || "").toString() === "1";
-
     return res.json({
       ok: true,
       resolved_city: city,
       coords_used: lat != null && lon != null ? { lat, lon } : null,
       cinemas,
-      ...(debug
-        ? {
-            debug: {
-              serpCounts,
-              serpStatus: data?.search_metadata?.status || null,
-              serpError: data?.error || null,
-              serpUrl: data?.search_metadata?.google_maps_url || null,
-              keysPresent: { serp: Boolean(SERPAPI_KEY), tmdb: Boolean(TMDB_KEY) },
-            },
-          }
-        : {}),
     });
   } catch (e) {
-    return res.status(500).json({
-      ok: false,
-      error: "Serverfehler",
-      details: String(e?.message || e),
-    });
+    return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
 });
 
@@ -485,7 +446,6 @@ app.get("/api/showtimes", async (req, res) => {
     const showtimesArr = result.data?.showtimes || [];
     const days = normalizeShowtimes(showtimesArr);
 
-    // TMDB enrich (limitiert)
     if (TMDB_KEY) {
       const MAX_ENRICH = 12;
       const uniqTitles = [];
