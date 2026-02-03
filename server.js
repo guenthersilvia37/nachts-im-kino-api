@@ -1,18 +1,18 @@
 import express from "express";
 import dotenv from "dotenv";
+import fetch from "node-fetch";
+global.fetch = fetch;
 
-// In Production auf Fly brauchst du dotenv nicht zwingend,
-// aber es schadet nicht lokal:
 if (process.env.NODE_ENV !== "production") {
   dotenv.config();
 }
 
 const app = express();
-
-// WICHTIG: Fallback + Number
 const PORT = Number(process.env.PORT) || 3000;
 
-// Optional: damit du echte Crash-Ursachen in Logs siehst
+const SERPAPI_KEY = (process.env.SERPAPI_KEY || "").trim();
+const TMDB_KEY = (process.env.TMDB_KEY || "").trim();
+
 process.on("unhandledRejection", (err) => console.error("unhandledRejection:", err));
 process.on("uncaughtException", (err) => console.error("uncaughtException:", err));
 // --------------------
