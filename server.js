@@ -177,7 +177,7 @@ async function nominatimSearch(q) {
 // --------------------
 // SerpApi: Google Maps (ROBUST)
 // --------------------
-async function serpApiGoogleMaps({ city, lat, lon }) {
+async function serpApiGoogleMaps({ city }) {
   if (!SERPAPI_KEY) {
     return { ok: false, status: 500, data: { error: "SERPAPI_KEY fehlt" } };
   }
@@ -185,27 +185,16 @@ async function serpApiGoogleMaps({ city, lat, lon }) {
   const url = new URL("https://serpapi.com/search.json");
   url.searchParams.set("engine", "google_maps");
   url.searchParams.set("type", "search");
-  url.searchParams.set("q", "Kino"); // stabiler als "Kino in Köln"
+  url.searchParams.set("q", "Kino");
   url.searchParams.set("location", `${city}, Germany`);
   url.searchParams.set("hl", "de");
   url.searchParams.set("gl", "de");
   url.searchParams.set("api_key", SERPAPI_KEY);
 
-  // optional, nur wenn sauber vorhanden
-  if (lat != null && lon != null) {
-    url.searchParams.set("ll", `@${lat},${lon},13z`);
-  }
-
   const r = await fetch(url.toString());
   const data = await r.json().catch(() => null);
 
-  // SerpApi Fehler kommen oft als JSON-Fehler bei HTTP 200
-  const serpError =
-    data?.error ||
-    data?.search_metadata?.status === "Error" ||
-    data?.search_metadata?.status === "Failure";
-
-  if (!r.ok || serpError) {
+  if (!r.ok || data?.error) {
     return { ok: false, status: r.status || 500, data };
   }
 
