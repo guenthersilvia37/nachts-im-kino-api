@@ -1,17 +1,16 @@
 import express from "express";
 import dotenv from "dotenv";
-import fetch from "node-fetch";
-global.fetch = fetch;
 
 if (process.env.NODE_ENV !== "production") {
   dotenv.config();
 }
 
 const app = express();
-const PORT = Number(process.env.PORT) || 3000;
 
 const SERPAPI_KEY = (process.env.SERPAPI_KEY || "").trim();
 const TMDB_KEY = (process.env.TMDB_KEY || "").trim();
+
+const PORT = Number(process.env.PORT) || 3000;
 
 process.on("unhandledRejection", (err) => console.error("unhandledRejection:", err));
 process.on("uncaughtException", (err) => console.error("uncaughtException:", err));
