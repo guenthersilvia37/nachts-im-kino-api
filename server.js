@@ -193,22 +193,23 @@ async function nominatimSearch(q) {
 // ✅ FIX: type=search + location ist wichtig
 // --------------------
 async function serpApiGoogleMaps({ city, lat, lon }) {
-  if (!SERPAPI_KEY)
-    return { ok: false, status: 500, data: { error: "SERPAPI_KEY fehlt" } };
+  if (!SERPAPI_KEY) return { ok: false, status: 500, data: { error: "SERPAPI_KEY fehlt" } };
 
   const url = new URL("https://serpapi.com/search.json");
+
   url.searchParams.set("engine", "google_maps");
-  url.searchParams.set("type", "search"); // ✅ wichtig
-  url.searchParams.set("q", `Kino in ${city}`);
+  url.searchParams.set("type", "search");              // ⭐ WICHTIG
+  url.searchParams.set("q", "kino");                   // ⭐ NICHT "Kino in Köln"
+  url.searchParams.set("location", `${city}, Germany`);// ⭐ WICHTIG
   url.searchParams.set("hl", "de");
   url.searchParams.set("gl", "de");
-  url.searchParams.set("google_domain", "google.de");
-  url.searchParams.set("location", `${city}, Germany`); // ✅ wichtig
   url.searchParams.set("api_key", SERPAPI_KEY);
 
-  if (lat && lon) url.searchParams.set("ll", `@${lat},${lon},12z`);
+  if (lat && lon) {
+    url.searchParams.set("ll", `@${lat},${lon},13z`);
+  }
 
-  const r = await _fetch(url.toString());
+  const r = await fetch(url.toString());
   const data = await r.json().catch(() => null);
 
   if (!r.ok) return { ok: false, status: r.status, data };
