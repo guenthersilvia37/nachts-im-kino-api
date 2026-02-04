@@ -650,6 +650,18 @@ if (name.toLowerCase().includes("cinedom")) {
     const showtimesArr = result.data?.showtimes || [];
     let days = normalizeShowtimes(showtimesArr);
 days = ensureSevenDays(days);
+
+// =====================================
+// FALLBACK: Kino-Webseite scrapen
+// =====================================
+if (days.length < 3) {
+  console.log("Google Showtimes leer → Scrape Kino Webseite:", name);
+
+  if (name.toLowerCase().includes("cinedom")) {
+    const scraped = await scrapeCinedom();
+    if (scraped.length) days.push(...scraped);
+  }
+}
     
 // ==============================
 // FALLBACK: Kino-Webseiten Scraper
