@@ -77,7 +77,40 @@ function ensureSevenDays(days) {
 
   return out;
 }
+function countRealDays(daysArr) {
+  return (daysArr || []).filter(d =>
+    Array.isArray(d.movies) &&
+    d.movies.some(m => Array.isArray(m.times) && m.times.length > 0)
+  ).length;
+}
 
+function mergeDays(primary = [], secondary = []) {
+  const map = new Map();
+
+  for (const d of primary) {
+    const key = `${d.day || ""}__${d.date || ""}`.trim();
+    if (!map.has(key)) map.set(key, d);
+  }
+
+  for (const d of secondary) {
+    const key = `${d.day || ""}__${d.date || ""}`.trim();
+    const existing = map.get(key);
+
+    if (!existing) {
+      map.set(key, d);
+      continue;
+    }
+
+    const existingHasMovies = Array.isArray(existing.movies) && existing.movies.length;
+    const newHasMovies = Array.isArray(d.movies) && d.movies.length;
+
+    if (!existingHasMovies && newHasMovies) {
+      map.set(key, d);
+    }
+  }
+
+  return [...map.values()];
+}
 function mergeDays(baseDays, extraDays) {
   const out = (baseDays || []).map((d) => ({
     day: d.day || "",
@@ -648,7 +681,55 @@ if (name.toLowerCase().includes("cinedom")) {
     if (!result.ok) return res.status(result.status).json({ ok: false, error: "SerpApi Fehler", details: result.data });
 
     const showtimesArr = result.data?.showtimes || [];
-    let days = normalizeShowtimes(showtimesArr);
+let days = normalizeShowtimes(showtimesArr);
+
+// ✅ HIER prüfen (BEVOR aufgefüllt wird)
+let realDays = countRealDays(days);
+
+// ✅ nur wenn nicht genug echte Tage -> Fallback
+if (realDays < 7) {
+  // Beispiel: Cinedom
+  if (name.toLowerCase().includes("cinedom")) {
+    try {
+      const scrapedDays = await scrapeCinedom(); // falls vorhanden
+      if (Array.isArray(scrapedDays) && scrapedDays.length) {
+        days = mergeDays(days, scrapedDays);
+      }
+    } catch (e) {
+      console.log("Cinedom Scrape Fehler:", e?.message || e);
+    }
+  }
+
+  realDays = countRealDays(days);
+}
+
+// ✅ GANZ am Ende erst auffüllen
+days = ensureSevenDays(days);
+
+// =====================================
+// ✅ FALLBACK: Kino-Webseite scrapen (nur wenn NICHT genug echte Tage)
+// =====================================
+if (realDays < 7) {
+  console.log("Showtimes < 7 echte Tage → Fallback aktiv:", { name, city, realDays });
+
+  // Beispiel: Cinedom (wenn du scrapeCinedom() bereits hast)
+  if (name.toLowerCase().includes("cinedom")) {
+    try {
+      const scrapedDays = await scrapeCinedom(); // muss Array<{day,date,movies:[{title,times,...}]}> liefern
+      if (Array.isArray(scrapedDays) && scrapedDays.length) {
+        // ✅ merge: scraped Tage hinzufügen (oder ersetzen – je nachdem wie du’s willst)
+        days = mergeDays(days, scrapedDays);
+      }
+    } catch (e) {
+      console.log("Cinedom Scrape Fehler:", e?.message || e);
+    }
+  }
+
+  // nach Fallback neu zählen
+  realDays = countRealDays(days);
+}
+
+// ✅ erst GANZ AM ENDE auf 7 Tage auffüllen
 days = ensureSevenDays(days);
 
 // =====================================
