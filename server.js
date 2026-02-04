@@ -232,6 +232,29 @@ function normalizeShowtimes(showtimesArr) {
       : [];
 
   const out = [];
+  
+  // ✅ FALL: SerpApi liefert direkt Filme (nicht nach Tagen gruppiert)
+if (arr.length && (arr[0]?.name || arr[0]?.showing)) {
+  const dateObj = new Date();
+  const dayLabel = dateObj.toLocaleDateString("de-DE", { weekday: "short" });
+  const dateLabel = dateObj.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
+
+  const movies = arr.map((m) => {
+    const title = (m?.name || m?.title || "Film").trim();
+    const times = Array.isArray(m?.showing)
+      ? m.showing.map(s => s?.time).filter(Boolean)
+      : [];
+
+    return {
+      title,
+      times,
+      poster: null,
+      info: { description: null, runtime: null, genres: [], cast: [] }
+    };
+  });
+
+  return [{ day: dayLabel, date: dateLabel, movies }];
+}
 
   for (const dayEntry of arr) {
     const rawDate = dayEntry?.date || dayEntry?.datetime || "";
