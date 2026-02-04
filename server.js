@@ -446,59 +446,6 @@ async function scrapeCinedom() {
     return [];
   }
 }
-// --------------------
-// Showtimes normalisieren
-// --------------------
-function ensureSevenDays(days) {
-  if (!Array.isArray(days) || days.length === 0) return days;
-
-  // Wenn schon 7 oder mehr → nichts tun
-  if (days.length >= 7) return days;
-
-  const result = [...days];
-  const lastRealDay = days[days.length - 1];
-
-  while (result.length < 7) {
-    result.push({
-      day: `Tag ${result.length + 1}`,
-      date: "",
-      movies: JSON.parse(JSON.stringify(lastRealDay.movies))
-    });
-  }
-
-  return result;
-}
-function normalizeShowtimes(showtimesArr) {
-  const days = [];
-
-  for (const d of showtimesArr || []) {
-    const dayLabel = d?.day || "";
-    const dateLabel = d?.date || "";
-
-    const movies = [];
-    for (const m of d?.movies || []) {
-      const title = (m?.name || m?.title || "").trim();
-      if (!title) continue;
-
-      const times = [];
-      for (const s of m?.showing || []) {
-        for (const t of s?.time || []) times.push(t);
-      }
-      const uniqTimes = [...new Set(times)].filter(Boolean);
-
-      movies.push({
-        title,
-        times: uniqTimes,
-        poster: m?.thumbnail || m?.poster || null,
-        info: { description: null, runtime: null, genres: [], cast: [] },
-      });
-    }
-
-    days.push({ day: dayLabel, date: dateLabel, movies });
-  }
-
-  return days;
-}
 
 // --------------------
 // TMDB helpers
