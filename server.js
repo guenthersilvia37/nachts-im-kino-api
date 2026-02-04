@@ -223,85 +223,39 @@ async function serpApiShowtimes({ cinemaName, city }) {
 // --------------------
 // Showtimes Normalization + 7 Tage
 // --------------------
-
 function normalizeShowtimes(showtimesArr) {
-  const arr = Array.isArray(showtimesArr)
-    ? showtimesArr
-    : Array.isArray(showtimesArr?.showtimes)
-      ? showtimesArr.showtimes
-      : [];
+  const daysMap = new Map();
 
-  const out = [];
-  
-  // ✅ FALL: SerpApi liefert direkt Filme (nicht nach Tagen gruppiert)
-if (arr.length && (arr[0]?.name || arr[0]?.showing)) {
-  const dateObj = new Date();
-  const dayLabel = dateObj.toLocaleDateString("de-DE", { weekday: "short" });
-  const dateLabel = dateObj.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
+  for (const entry of showtimesArr || []) {
+    if (!entry?.date) continue;
 
-  const movies = arr.map((m) => {
-    const title = (m?.name || m?.title || "Film").trim();
-    const times = Array.isArray(m?.showing)
-      ? m.showing.map(s => s?.time).filter(Boolean)
-      : [];
+    const dateObj = new Date(entry.date);
+    if (Number.isNaN(dateObj.getTime())) continue;
 
-    return {
-      title,
+    const day = dateObj.toLocaleDateString("de-DE", { weekday: "short" }); // "Mo"
+    const date = dateObj.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" }); // "04.02"
+
+    if (!daysMap.has(date)) daysMap.set(date, { day, date, movies: [] });
+
+    // SerpApi liefert je nach Block times entweder als [{time:"20:15"}] oder als strings
+    let times = [];
+    if (Array.isArray(entry.times)) {
+      times = entry.times
+        .map((t) => (typeof t === "string" ? t : t?.time))
+        .filter(Boolean);
+    }
+
+    daysMap.get(date).movies.push({
+      title: entry.name || "Film",
       times,
       poster: null,
-      info: { description: null, runtime: null, genres: [], cast: [] }
-    };
-  });
-
-  return [{ day: dayLabel, date: dateLabel, movies }];
-}
-
-  for (const dayEntry of arr) {
-    const rawDate = dayEntry?.date || dayEntry?.datetime || "";
-    const dateObj = rawDate ? new Date(rawDate) : new Date();
-
-    const dayLabel =
-      dayEntry?.day ||
-      dateObj.toLocaleDateString("de-DE", { weekday: "short" });
-
-    const dateLabel =
-      dateObj.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
-
-    const movieList =
-      Array.isArray(dayEntry?.movies) ? dayEntry.movies :
-      Array.isArray(dayEntry?.films) ? dayEntry.films :
-      Array.isArray(dayEntry?.showtimes) ? dayEntry.showtimes :
-      [];
-
-    const movies = movieList.map((m) => {
-      const title = (m?.name || m?.title || "Film").trim();
-
-      const rawTimes =
-        Array.isArray(m?.showtimes) ? m.showtimes :
-        Array.isArray(m?.times) ? m.times :
-        [];
-
-      const times = rawTimes
-        .map(t =>
-          typeof t === "string"
-            ? t
-            : (t?.time || t?.start_time || t?.starts_at || "")
-        )
-        .filter(Boolean);
-
-      return {
-        title,
-        times,
-        poster: null,
-        info: { description: null, runtime: null, genres: [], cast: [] }
-      };
+      info: { description: null, runtime: null, genres: [], cast: [] },
     });
-
-    out.push({ day: dayLabel, date: dateLabel, movies });
   }
 
-  return out;
+  return Array.from(daysMap.values());
 }
+
 function ensureSevenDays(days) {
   const now = new Date();
   const want = [];
@@ -593,7 +547,6 @@ app.get("/api/showtimes", async (req, res) => {
       return res.status(result.status).json({ ok: false, error: "SerpApi Fehler", details: result.data });
 
     const showtimesArr = result.data?.showtimes || [];
-    const debugSample = showtimesArr?.[0] || null;
     let days = normalizeShowtimes(showtimesArr);
     let realDays = countRealDays(days);
 
@@ -663,7 +616,6 @@ app.get("/api/showtimes", async (req, res) => {
       days,
       raw_has_showtimes: Array.isArray(showtimesArr) && showtimesArr.length > 0,
       real_days_found: realDays,
-      debug_sample: debugSample,
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
