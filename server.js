@@ -63,44 +63,6 @@ function normalizeShowtimes(showtimesArr) {
 // ✅ Showtimes: 7-Tage erzwingen + mergen + placeholders
 // --------------------
 
-function normalizeShowtimes(showtimesArr) {
-  const daysMap = new Map();
-
-  for (const dayEntry of showtimesArr || []) {
-    if (!dayEntry?.date) continue;
-
-    const dateObj = new Date(dayEntry.date);
-    const day = dateObj.toLocaleDateString("de-DE", { weekday: "short" });
-    const date = dateObj.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
-
-    if (!daysMap.has(date)) {
-      daysMap.set(date, { day, date, movies: [] });
-    }
-
-    const movieMap = new Map();
-
-    for (const s of dayEntry.showtimes || []) {
-      const title = s.movie?.trim();
-      const time = s.time?.trim();
-      if (!title || !time) continue;
-
-      if (!movieMap.has(title)) {
-        movieMap.set(title, {
-          title,
-          times: [],
-          poster: null,
-          info: { description: null, runtime: null, genres: [], cast: [] }
-        });
-      }
-
-      movieMap.get(title).times.push(time);
-    }
-
-    daysMap.get(date).movies = Array.from(movieMap.values());
-  }
-
-  return Array.from(daysMap.values());
-}
 function ensureSevenDays(days) {
   const now = new Date();
   const want = [];
