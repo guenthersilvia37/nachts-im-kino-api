@@ -225,42 +225,56 @@ async function serpApiShowtimes({ cinemaName, city }) {
 // --------------------
 
 function normalizeShowtimes(showtimesArr) {
+  const arr = Array.isArray(showtimesArr)
+    ? showtimesArr
+    : Array.isArray(showtimesArr?.showtimes)
+      ? showtimesArr.showtimes
+      : [];
+
   const out = [];
 
-  const days = Array.isArray(showtimesArr) ? showtimesArr : [];
+  for (const dayEntry of arr) {
+    const rawDate = dayEntry?.date || dayEntry?.datetime || "";
+    const dateObj = rawDate ? new Date(rawDate) : new Date();
 
-  for (let idx = 0; idx < days.length; idx++) {
-    const entry = days[idx] || {};
+    const dayLabel =
+      dayEntry?.day ||
+      dateObj.toLocaleDateString("de-DE", { weekday: "short" });
 
-    const dateObj = new Date();
-    dateObj.setDate(dateObj.getDate() + idx);
+    const dateLabel =
+      dateObj.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
 
-    const day = dateObj.toLocaleDateString("de-DE", { weekday: "short" });
-    const date = dateObj.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
+    const movieList =
+      Array.isArray(dayEntry?.movies) ? dayEntry.movies :
+      Array.isArray(dayEntry?.films) ? dayEntry.films :
+      Array.isArray(dayEntry?.showtimes) ? dayEntry.showtimes :
+      [];
 
-    const moviesArr = Array.isArray(entry.movies) ? entry.movies : [];
+    const movies = movieList.map((m) => {
+      const title = (m?.name || m?.title || "Film").trim();
 
-    const movies = moviesArr.map((m) => {
-      let times = [];
+      const rawTimes =
+        Array.isArray(m?.showtimes) ? m.showtimes :
+        Array.isArray(m?.times) ? m.times :
+        [];
 
-      if (Array.isArray(m.showing)) {
-        times = m.showing.map((s) => s?.time).filter(Boolean);
-      } else if (Array.isArray(m.times)) {
-        times = m.times
-          .map((t) => (typeof t === "string" ? t : t?.time))
-          .filter(Boolean);
-      }
+      const times = rawTimes
+        .map(t =>
+          typeof t === "string"
+            ? t
+            : (t?.time || t?.start_time || t?.starts_at || "")
+        )
+        .filter(Boolean);
 
       return {
-        title: m?.name || "Film",
+        title,
         times,
         poster: null,
-        info: { description: null, runtime: null, genres: [], cast: [] },
+        info: { description: null, runtime: null, genres: [], cast: [] }
       };
     });
 
-    out.push({ day, date, movies });
-    if (out.length >= 7) break;
+    out.push({ day: dayLabel, date: dateLabel, movies });
   }
 
   return out;
