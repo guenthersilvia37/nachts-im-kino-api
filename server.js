@@ -449,6 +449,25 @@ async function scrapeCinedom() {
 // --------------------
 // Showtimes normalisieren
 // --------------------
+function ensureSevenDays(days) {
+  if (!Array.isArray(days) || days.length === 0) return days;
+
+  // Wenn schon 7 oder mehr → nichts tun
+  if (days.length >= 7) return days;
+
+  const result = [...days];
+  const lastRealDay = days[days.length - 1];
+
+  while (result.length < 7) {
+    result.push({
+      day: `Tag ${result.length + 1}`,
+      date: "",
+      movies: JSON.parse(JSON.stringify(lastRealDay.movies))
+    });
+  }
+
+  return result;
+}
 function normalizeShowtimes(showtimesArr) {
   const days = [];
 
@@ -682,7 +701,8 @@ if (name.toLowerCase().includes("cinedom")) {
     if (!result.ok) return res.status(result.status).json({ ok: false, error: "SerpApi Fehler", details: result.data });
 
     const showtimesArr = result.data?.showtimes || [];
-    const days = normalizeShowtimes(showtimesArr);
+    let days = normalizeShowtimes(showtimesArr);
+days = ensureSevenDays(days);
     
 // ==============================
 // FALLBACK: Kino-Webseiten Scraper
