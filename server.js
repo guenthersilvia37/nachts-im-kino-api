@@ -84,33 +84,6 @@ function countRealDays(daysArr) {
   ).length;
 }
 
-function mergeDays(primary = [], secondary = []) {
-  const map = new Map();
-
-  for (const d of primary) {
-    const key = `${d.day || ""}__${d.date || ""}`.trim();
-    if (!map.has(key)) map.set(key, d);
-  }
-
-  for (const d of secondary) {
-    const key = `${d.day || ""}__${d.date || ""}`.trim();
-    const existing = map.get(key);
-
-    if (!existing) {
-      map.set(key, d);
-      continue;
-    }
-
-    const existingHasMovies = Array.isArray(existing.movies) && existing.movies.length;
-    const newHasMovies = Array.isArray(d.movies) && d.movies.length;
-
-    if (!existingHasMovies && newHasMovies) {
-      map.set(key, d);
-    }
-  }
-
-  return [...map.values()];
-}
 function mergeDays(baseDays, extraDays) {
   const out = (baseDays || []).map((d) => ({
     day: d.day || "",
