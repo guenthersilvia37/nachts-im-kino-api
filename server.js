@@ -547,6 +547,7 @@ app.get("/api/showtimes", async (req, res) => {
       return res.status(result.status).json({ ok: false, error: "SerpApi Fehler", details: result.data });
 
     const showtimesArr = result.data?.showtimes || [];
+    const debugSample = showtimesArr?.[0] || null;
     let days = normalizeShowtimes(showtimesArr);
     let realDays = countRealDays(days);
 
@@ -616,6 +617,7 @@ app.get("/api/showtimes", async (req, res) => {
       days,
       raw_has_showtimes: Array.isArray(showtimesArr) && showtimesArr.length > 0,
       real_days_found: realDays,
+      debug_sample: debugSample,
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
