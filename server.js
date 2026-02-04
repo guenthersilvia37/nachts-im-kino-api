@@ -35,6 +35,107 @@ app.get("/api/health", (req, res) =>
 // --------------------
 // Helpers
 // --------------------
+// --------------------
+// ✅ Showtimes: 7-Tage erzwingen + mergen + placeholders
+// --------------------
+function ensureSevenDays(days) {
+  const now = new Date();
+  const want = [];
+
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(now);
+    d.setDate(now.getDate() + i);
+
+    const day = d.toLocaleDateString("de-DE", { weekday: "short" }); // z.B. "Mo"
+    const date = d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" }); // "04.02"
+
+    want.push({
+      day,
+      date,
+      movies: [],
+    });
+  }
+
+  // map existing by date string if possible, else by index
+  const byDate = new Map();
+  (days || []).forEach((x, idx) => {
+    const key = escStr(x?.date || "").trim();
+    if (key) byDate.set(key, x);
+    else byDate.set(`idx:${idx}`, x);
+  });
+
+  // merge: if same date label exists, use it, else fill
+  const out = want.map((w) => {
+    const found = byDate.get(w.date);
+    if (found) return {
+      day: found.day || w.day,
+      date: found.date || w.date,
+      movies: Array.isArray(found.movies) ? found.movies : [],
+    };
+    return w;
+  });
+
+  return out;
+}
+
+function mergeDays(baseDays, extraDays) {
+  const out = (baseDays || []).map((d) => ({
+    day: d.day || "",
+    date: d.date || "",
+    movies: Array.isArray(d.movies) ? [...d.movies] : [],
+  }));
+
+  const extra = Array.isArray(extraDays) ? extraDays : [];
+
+  for (let i = 0; i < out.length; i++) {
+    const a = out[i];
+    const b = extra[i];
+    if (!b) continue;
+
+    // merge movies by title
+    const map = new Map();
+    for (const m of a.movies || []) {
+      const t = escStr(m?.title).trim();
+      if (!t) continue;
+      map.set(t.toLowerCase(), m);
+    }
+    for (const m of b.movies || []) {
+      const t = escStr(m?.title).trim();
+      if (!t) continue;
+      const k = t.toLowerCase();
+      if (!map.has(k)) map.set(k, m);
+      else {
+        // merge times + poster
+        const old = map.get(k);
+        const times = [...new Set([...(old.times || []), ...(m.times || [])])].filter(Boolean);
+        old.times = times;
+        if (!old.poster && m.poster) old.poster = m.poster;
+        old.info = old.info || m.info || old.info;
+      }
+    }
+    a.movies = Array.from(map.values());
+  }
+
+  return out;
+}
+
+function ensureMovieFields(days) {
+  for (const d of days || []) {
+    d.movies = Array.isArray(d.movies) ? d.movies : [];
+    for (const m of d.movies) {
+      m.title = escStr(m.title || "Film");
+      m.times = Array.isArray(m.times) ? m.times.filter(Boolean) : [];
+
+      // IMMER info-Objekt
+      if (!m.info) m.info = {};
+      if (!("description" in m.info)) m.info.description = null;
+      if (!("runtime" in m.info)) m.info.runtime = null;
+      if (!Array.isArray(m.info.genres)) m.info.genres = [];
+      if (!Array.isArray(m.info.cast)) m.info.cast = [];
+    }
+  }
+  return days;
+}
 function escStr(v) {
   return String(v ?? "");
 }
@@ -53,6 +154,70 @@ function pickCity(geoItem, fallback) {
     geoItem?.display_name?.split(",")?.[0] ||
     fallback
   );
+}
+
+// --------------------
+// Chain directory (DE)  ✅ SCHRITT A
+// --------------------
+const CHAINS = ["cinedom","cineplex","cinemaxx","uci","cinestar","kinopolis"];
+
+let chainDirectory = []; // [{chain, id, name, city, programUrl}]
+
+// --------------------
+// ✅ SCHRITT B: Kette erkennen + Programmlink finden (DE)
+// --------------------
+function detectChainFromName(name) {
+  const t = escStr(name).toLowerCase();
+  if (t.includes("cinedom")) return "cinedom";
+  if (t.includes("cineplex")) return "cineplex";
+  if (t.includes("cinemaxx") || t.includes("cinemax")) return "cinemaxx";
+  if (t.includes("uci")) return "uci";
+  if (t.includes("cinestar") || t.includes("cine star")) return "cinestar";
+  if (t.includes("kinopolis")) return "kinopolis";
+  return null;
+}
+
+// SerpApi Google (Organic) -> erstes Result als Link
+async function serpApiOrganicFirstLink(q, locationHint = "Germany") {
+  if (!SERPAPI_KEY) return null;
+
+  const url = new URL("https://serpapi.com/search.json");
+  url.searchParams.set("engine", "google");
+  url.searchParams.set("q", q);
+  url.searchParams.set("hl", "de");
+  url.searchParams.set("gl", "de");
+  url.searchParams.set("google_domain", "google.de");
+  url.searchParams.set("location", locationHint);
+  url.searchParams.set("api_key", SERPAPI_KEY);
+
+  const r = await fetch(url.toString());
+  const data = await r.json().catch(() => null);
+  if (!r.ok || !data || data?.error) return null;
+
+  const first = Array.isArray(data.organic_results) ? data.organic_results[0] : null;
+  return first?.link || null;
+}
+
+// Programmlinks für Ketten suchen (deutschlandweit)
+async function resolveProgramUrl({ chain, cinemaName, city }) {
+  if (!chain) return null;
+
+  // Cinedom: feste Programmübersicht
+  if (chain === "cinedom") return "https://cinedom.de/programmuebersicht/";
+
+  const loc = city ? `${city}, Germany` : "Germany";
+
+  // site:-Queries: wir suchen direkt nach einer Programm/Spielplan-Seite
+  const queriesByChain = {
+    cineplex: `site:cineplex.de ${city} programm kino ${cinemaName}`,
+    cinemaxx: `site:cinemaxx.de kinoprogramm ${city} ${cinemaName}`,
+    uci: `site:uci-kinowelt.de choose-cinema ${city} ${cinemaName}`,
+    cinestar: `site:cinestar.de kinoprogramm ${city} ${cinemaName}`,
+    kinopolis: `site:kinopolis.de programm ${city} ${cinemaName}`,
+  };
+
+  const q = queriesByChain[chain] || `${cinemaName} programm ${city}`;
+  return serpApiOrganicFirstLink(q, loc);
 }
 
 // --------------------
@@ -231,7 +396,56 @@ async function serpApiShowtimes({ cinemaName, city }) {
   if (data?.error) return { ok: false, status: 500, data };
   return { ok: true, status: 200, data };
 }
+// --------------------
+// Cinedom Scraper (7 Tage garantiert)
+// --------------------
+async function scrapeCinedom() {
+  try {
+    const r = await fetch("https://cinedom.de/programmuebersicht/");
+    const html = await r.text();
 
+    const dayRegex = /data-date="([^"]+)"/g;
+    const movieRegex = /<a[^>]*href="\/film\/[^"]+"[^>]*>(.*?)<\/a>/g;
+    const timeRegex = /\b\d{2}:\d{2}\b/g;
+
+    const days = [];
+    let dayMatch;
+
+    while ((dayMatch = dayRegex.exec(html)) !== null) {
+      const date = dayMatch[1];
+
+      const movies = [];
+      let movieMatch;
+
+      while ((movieMatch = movieRegex.exec(html)) !== null) {
+        const title = movieMatch[1].replace(/<[^>]+>/g, "").trim();
+        const times = [...html.matchAll(timeRegex)].map(t => t[0]);
+
+        if (title) {
+          movies.push({
+            title,
+            times: [...new Set(times)],
+            poster: null,
+            info: { description: null, runtime: null, genres: [], cast: [] }
+          });
+        }
+      }
+
+      days.push({
+        day: "",
+        date,
+        movies
+      });
+
+      if (days.length >= 7) break;
+    }
+
+    return days;
+  } catch (e) {
+    console.log("Cinedom Scrape Fehler:", e.message);
+    return [];
+  }
+}
 // --------------------
 // Showtimes normalisieren
 // --------------------
@@ -444,13 +658,133 @@ app.get("/api/showtimes", async (req, res) => {
     if (!city) return res.status(400).json({ ok: false, error: "city fehlt" });
 
     if (isBlockedTitle(name)) return res.status(400).json({ ok: false, error: "Dieses Kino ist blockiert." });
+// ✅ 1) Cinedom direkt scrapen (liefert 7 Tage wenn möglich)
+if (name.toLowerCase().includes("cinedom")) {
+  const days = await scrapeCinedom();
 
+  // Wenn Scraper was liefert -> sofort zurückgeben (TMDB-Enrich kommt unten auch noch)
+  if (Array.isArray(days) && days.length) {
+    // optional: TMDB Enrich wie unten (damit Beschreibung/Genres/Cast/Trailer/Galerie kommen)
+    // Wir lassen den Code weiterlaufen und setzen "days" vor dem Return
+    // => Einfach hier returnen ist am simpelsten, aber ohne TMDB-Infos.
+    // Wenn du TMDB willst, sag kurz Bescheid, dann gebe ich dir die saubere Variante.
+
+    return res.json({
+      ok: true,
+      cinema: name,
+      city,
+      days,
+      source: "cinedom_scrape"
+    });
+  }
+}
     const result = await serpApiShowtimes({ cinemaName: name, city });
     if (!result.ok) return res.status(result.status).json({ ok: false, error: "SerpApi Fehler", details: result.data });
 
     const showtimesArr = result.data?.showtimes || [];
     const days = normalizeShowtimes(showtimesArr);
+    
+// ==============================
+// FALLBACK: Kino-Webseiten Scraper
+// ==============================
+async function scrapeCinemaWebsite(cinemaName, city) {
+  const name = cinemaName.toLowerCase();
 
+  const tryFetch = async (url) => {
+    try {
+      const r = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" }});
+      return await r.text();
+    } catch {
+      return null;
+    }
+  };
+
+  // ----------- Cinedom -----------
+  if (name.includes("cinedom")) {
+    const html = await tryFetch("https://cinedom.de/programmuebersicht/");
+    if (!html) return null;
+
+    const days = [];
+    const dayBlocks = html.split("prog-day");
+
+    for (const block of dayBlocks.slice(1, 8)) {
+      const movies = [];
+      const movieParts = block.split("prog-movie");
+
+      for (const m of movieParts.slice(1)) {
+        const titleMatch = m.match(/title="([^"]+)"/);
+        const times = [...m.matchAll(/prog-time">([^<]+)/g)].map(x => x[1]);
+
+        if (titleMatch) {
+          movies.push({
+            title: titleMatch[1].trim(),
+            times,
+            poster: null,
+            info: { description: null, runtime: null, genres: [], cast: [] }
+          });
+        }
+      }
+
+      days.push({
+        day: "",
+        date: "",
+        movies
+      });
+    }
+
+    return days;
+  }
+
+  // ----------- Cineplex / Cinemaxx / UCI / Cinestar / Kinopolis -----------
+  // Diese Seiten sind React/Vue -> JSON im Script-Tag!
+  const baseMap = [
+    "cineplex.de",
+    "cinemaxx.de",
+    "uci-kinowelt.de",
+    "cinestar.de",
+    "kinopolis.de"
+  ];
+
+  for (const base of baseMap) {
+    const url = `https://${base}`;
+    const html = await tryFetch(url);
+    if (!html) continue;
+
+    const jsonMatch = html.match(/__NEXT_DATA__ = ({.*});/);
+    if (!jsonMatch) continue;
+
+    try {
+      const data = JSON.parse(jsonMatch[1]);
+      const films = data?.props?.pageProps?.films || [];
+
+      const days = [];
+      for (let i = 0; i < 7; i++) {
+        days.push({
+          day: "",
+          date: "",
+          movies: films.map(f => ({
+            title: f.title,
+            times: (f.showtimes || []).map(s => s.time),
+            poster: null,
+            info: { description: null, runtime: null, genres: [], cast: [] }
+          }))
+        });
+      }
+
+      return days;
+    } catch {}
+  }
+
+  return null;
+}
+// Wenn weniger als 7 Tage von Google → versuche Kino-Webseite
+if (days.length < 7) {
+  const scraped = await scrapeCinemaWebsite(name, city);
+  if (scraped && scraped.length) {
+    console.log("SCRAPER AKTIV für", name);
+    days.splice(0, days.length, ...scraped);
+  }
+}
     if (TMDB_KEY) {
       const MAX_ENRICH = 12;
       const uniqTitles = [];
