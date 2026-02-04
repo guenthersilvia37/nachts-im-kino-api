@@ -223,39 +223,48 @@ async function serpApiShowtimes({ cinemaName, city }) {
 // --------------------
 // Showtimes Normalization + 7 Tage
 // --------------------
+
 function normalizeShowtimes(showtimesArr) {
-  const daysMap = new Map();
+  const out = [];
 
-  for (const entry of showtimesArr || []) {
-    if (!entry?.date) continue;
+  const days = Array.isArray(showtimesArr) ? showtimesArr : [];
 
-    const dateObj = new Date(entry.date);
-    if (Number.isNaN(dateObj.getTime())) continue;
+  for (let idx = 0; idx < days.length; idx++) {
+    const entry = days[idx] || {};
 
-    const day = dateObj.toLocaleDateString("de-DE", { weekday: "short" }); // "Mo"
-    const date = dateObj.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" }); // "04.02"
+    const dateObj = new Date();
+    dateObj.setDate(dateObj.getDate() + idx);
 
-    if (!daysMap.has(date)) daysMap.set(date, { day, date, movies: [] });
+    const day = dateObj.toLocaleDateString("de-DE", { weekday: "short" });
+    const date = dateObj.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
 
-    // SerpApi liefert je nach Block times entweder als [{time:"20:15"}] oder als strings
-    let times = [];
-    if (Array.isArray(entry.times)) {
-      times = entry.times
-        .map((t) => (typeof t === "string" ? t : t?.time))
-        .filter(Boolean);
-    }
+    const moviesArr = Array.isArray(entry.movies) ? entry.movies : [];
 
-    daysMap.get(date).movies.push({
-      title: entry.name || "Film",
-      times,
-      poster: null,
-      info: { description: null, runtime: null, genres: [], cast: [] },
+    const movies = moviesArr.map((m) => {
+      let times = [];
+
+      if (Array.isArray(m.showing)) {
+        times = m.showing.map((s) => s?.time).filter(Boolean);
+      } else if (Array.isArray(m.times)) {
+        times = m.times
+          .map((t) => (typeof t === "string" ? t : t?.time))
+          .filter(Boolean);
+      }
+
+      return {
+        title: m?.name || "Film",
+        times,
+        poster: null,
+        info: { description: null, runtime: null, genres: [], cast: [] },
+      };
     });
+
+    out.push({ day, date, movies });
+    if (out.length >= 7) break;
   }
 
-  return Array.from(daysMap.values());
+  return out;
 }
-
 function ensureSevenDays(days) {
   const now = new Date();
   const want = [];
