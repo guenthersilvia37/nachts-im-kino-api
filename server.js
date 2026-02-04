@@ -50,7 +50,9 @@ function normalizeShowtimes(showtimesArr) {
 
     daysMap.get(date).movies.push({
       title: entry.name || "Film",
-    times: Array.isArray(entry.times) ? entry.times.filter(Boolean) : [],
+    times: (entry.times || [])
+  .map(t => (typeof t === "string" ? t : t?.time))
+  .filter(Boolean),
       poster: null,
       info: { description: null, runtime: null, genres: [], cast: [] }
     });
