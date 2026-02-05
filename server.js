@@ -571,7 +571,21 @@ app.get("/api/showtimes", async (req, res) => {
         realDays = countRealDays(days);
       }
     }
+// 2b) Fallback: Playwright (echte Kinoseite), wenn immer noch zu wenig echte Zeiten
+if (realDays < 2) {
+  try {
+    // Erwartung: getShowtimesFromWebsite gibt Array von days zurück:
+    // [{ day:"Mi", date:"04.02.", movies:[{title,times,...}] }, ...]
+    const pwDays = await getShowtimesFromWebsite({ cinemaName: name, city });
 
+    if (Array.isArray(pwDays) && pwDays.length) {
+      days = mergeDays(days, pwDays);
+      realDays = countRealDays(days);
+    }
+  } catch (e) {
+    console.log("Playwright Fehler:", e?.message || e);
+  }
+}
     // 3) Immer am Ende auf 7 Tage auffüllen
     days = ensureSevenDays(days);
 
