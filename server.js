@@ -1,4 +1,5 @@
 // server.js
+import { getShowtimesFromWebsite } from "./playwright.js";
 import express from "express";
 import dotenv from "dotenv";
 
