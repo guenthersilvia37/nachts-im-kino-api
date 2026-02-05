@@ -365,17 +365,17 @@ let pwDebug = { note: "Playwright deaktiviert" };
 
     // Wenn Playwright nichts findet → ok:false damit Frontend sauber reagieren kann
     if (realDays === 0) {
-      return res.json({
-        ok: false,
-        cinema: name,
-        city,
-        url,
-        days,
-        real_days_found: 0,
-        error: "Keine Spielzeiten auf der Seite gefunden (oder Seite blockt Scraping).",
-      });
-    }
-
+  return res.json({
+    ok: false,
+    cinema: name,
+    city,
+    url,
+    days,
+    real_days_found: 0,
+    error: "Keine Spielzeiten auf der Seite gefunden (oder Seite blockt Scraping).",
+    debug: pwDebug, // ✅ NEU
+  });
+}
     // Optional TMDB enrich
     if (TMDB_KEY) {
       const MAX_ENRICH = 12;
