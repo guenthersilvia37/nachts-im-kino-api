@@ -356,21 +356,9 @@ app.get("/api/showtimes", async (req, res) => {
       });
     }
 
-    let days = [];
-let pwDebug = null;
-
-try {
-  const pw = await getShowtimesFromWebsite(url);
-
-  // neue playwright.js liefert { days, debug }
-  if (pw && Array.isArray(pw.days)) days = pw.days;
-  pwDebug = pw?.debug || null;
-
-} catch (e) {
-  console.log("Playwright Fehler:", e?.message || e);
-  days = [];
-  pwDebug = { error: String(e?.message || e) };
-}
+    // ⛔ Playwright TEMPORÄR deaktiviert (Server-Stabilität)
+let days = [];
+let pwDebug = { note: "Playwright deaktiviert" };
 
     days = ensureSevenDays(days);
     const realDays = countRealDays(days);
