@@ -1,13 +1,12 @@
-FROM node:20-alpine
+FROM node:20-slim
 
 WORKDIR /app
 
 COPY package*.json ./
 RUN npm install
 
-COPY . .
+RUN npx playwright install --with-deps chromium
 
-ENV PORT=3000
-EXPOSE 3000
+COPY . .
 
 CMD ["node", "server.js"]
