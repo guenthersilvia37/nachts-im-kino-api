@@ -69,8 +69,22 @@ async function nominatimSearch(q) {
     "https://nominatim.openstreetmap.org/search?format=json&limit=1&addressdetails=1&q=" +
     encodeURIComponent(q);
 
-  const r = await fetch(url, { headers: { "User-Agent": UA } });
-  if (!r.ok) return [];
+  const r = await fetch(url, {
+    headers: {
+      // wichtig: Nominatim will eine identifizierbare Anfrage
+      "User-Agent": "nachts-im-kino/1.0 (contact: support@deine-domain.de)",
+      "Accept-Language": "de",
+      "From": "support@deine-domain.de",
+    },
+  });
+
+  if (!r.ok) {
+    console.log("Nominatim Fehler Status:", r.status);
+    const txt = await r.text().catch(() => "");
+    console.log("Nominatim Body:", txt.slice(0, 200));
+    return [];
+  }
+
   return r.json();
 }
 
