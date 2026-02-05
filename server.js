@@ -72,9 +72,9 @@ async function nominatimSearch(q) {
   const r = await fetch(url, {
     headers: {
       // wichtig: Nominatim will eine identifizierbare Anfrage
-      "User-Agent": "nachts-im-kino/1.0 (contact: support@deine-domain.de)",
+      "User-Agent": "nachts-im-kino/1.0 (contact: guenther_silvia@web.de)",
       "Accept-Language": "de",
-      "From": "support@deine-domain.de",
+      "From": "guenther_silvia@web.de",
     },
   });
 
