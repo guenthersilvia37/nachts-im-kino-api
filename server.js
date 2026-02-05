@@ -1,13 +1,12 @@
-// server.js
-import { getShowtimesFromWebsite } from "./playwright.js";
+// server.js (SerpApi entfernt, Overpass + Playwright)
 import express from "express";
 import dotenv from "dotenv";
+import { getShowtimesFromWebsite } from "./playwright.js";
 
 if (process.env.NODE_ENV !== "production") dotenv.config();
 
 const app = express();
 
-const SERPAPI_KEY = (process.env.SERPAPI_KEY || "").trim();
 const TMDB_KEY = (process.env.TMDB_KEY || "").trim();
 const PORT = Number(process.env.PORT) || 3000;
 
@@ -30,7 +29,7 @@ app.use((req, res, next) => {
 // --------------------
 app.get("/", (req, res) => res.send("ok"));
 app.get("/api/health", (req, res) =>
-  res.json({ ok: true, serp: Boolean(SERPAPI_KEY), tmdb: Boolean(TMDB_KEY) })
+  res.json({ ok: true, overpass: true, tmdb: Boolean(TMDB_KEY) })
 );
 
 // --------------------
@@ -60,104 +59,14 @@ function pickCity(geoItem, fallback) {
 // Blocklist (Kinos / Titel)
 // --------------------
 const BLOCKED_WORDS = [
-  "erotik",
-  "sex",
-  "sexy",
-  "adult",
-  "porno",
-  "porn",
-  "blue movie",
-  "fkk",
-  "bordell",
-  "strip",
-  "peepshow",
-  "escort",
-  "privatclub",
-  "sauna club",
-  "sauna",
-  "massage",
-  "erdbeermund",
-  "kino hole",
-  "hole kino",
-  "sexkino",
-  "adult kino",
+  "erotik","sex","sexy","adult","porno","porn","blue movie","fkk","bordell","strip","peepshow",
+  "escort","privatclub","sauna club","sauna","massage","erdbeermund","kino hole","hole kino",
+  "sexkino","adult kino",
 ];
 
 function isBlockedTitle(title) {
   const t = escStr(title).toLowerCase();
   return BLOCKED_WORDS.some((w) => t.includes(w));
-}
-
-// --------------------
-// Kino-Filter (Maps Results)
-// --------------------
-const CINEMA_WORDS = [
-  "kino",
-  "kinos",
-  "cinema",
-  "cine",
-  "movie theater",
-  "movie theatre",
-  "filmtheater",
-  "lichtspiele",
-  "filmhaus",
-  "programmkino",
-  "arthouse",
-  "filmkunst",
-  "kinocenter",
-];
-
-const CINEMA_BRANDS = [
-  "cinedom",
-  "cinemaxx",
-  "uci",
-  "cineplex",
-  "cinestar",
-  "kinopolis",
-  "filmpalast",
-  "metropolis",
-];
-
-const BAD_VENUE_WORDS = ["club", "bar", "lounge", "massage", "sauna", "bordell"];
-
-function looksLikeCinemaByCategory(p) {
-  const type = escStr(p?.type).toLowerCase();
-  const category = escStr(p?.category).toLowerCase();
-  return (
-    type.includes("movie") ||
-    type.includes("cinema") ||
-    type.includes("theater") ||
-    category.includes("movie") ||
-    category.includes("cinema") ||
-    category.includes("theater")
-  );
-}
-
-function isCinemaPlace(p) {
-  const title = escStr(p?.title || p?.name).toLowerCase();
-  if (isBlockedTitle(title)) return false;
-
-  const byCat = looksLikeCinemaByCategory(p);
-  const byText = CINEMA_BRANDS.some((b) => title.includes(b)) || CINEMA_WORDS.some((w) => title.includes(w));
-
-  const looksBad = BAD_VENUE_WORDS.some((w) => title.includes(w));
-  if (looksBad && !byCat && !byText) return false;
-
-  return byCat || byText;
-}
-
-function normalizeCinema(p) {
-  return {
-    title: p?.title || p?.name || "Kino",
-    address: p?.address || p?.full_address || "",
-    rating: p?.rating ?? null,
-    reviews: p?.reviews ?? null,
-    place_id: p?.place_id || p?.data_id || null,
-    link: p?.link || p?.website || null,
-    gps_coordinates: p?.gps_coordinates || null,
-    category: p?.category || null,
-    type: p?.type || null,
-  };
 }
 
 // --------------------
@@ -174,100 +83,110 @@ async function nominatimSearch(q) {
 }
 
 // --------------------
-// SerpApi: Google Maps
+// Overpass (OSM) - Kinos in Umgebung
 // --------------------
-async function serpApiGoogleMaps({ city, lat, lon }) {
-  if (!SERPAPI_KEY) return { ok: false, status: 500, data: { error: "SERPAPI_KEY fehlt" } };
+async function overpassCinemas({ lat, lon, radiusMeters = 12000 }) {
+  const endpoint = "https://overpass-api.de/api/interpreter";
 
-  const url = new URL("https://serpapi.com/search.json");
-  url.searchParams.set("engine", "google_maps");
-  url.searchParams.set("q", `Kino in ${city}`);
-  url.searchParams.set("hl", "de");
-  url.searchParams.set("gl", "de");
-  url.searchParams.set("api_key", SERPAPI_KEY);
+  // amenity=cinema als node/way/relation, center für way/relation
+  const query = `
+[out:json][timeout:25];
+(
+  node["amenity"="cinema"](around:${radiusMeters},${lat},${lon});
+  way["amenity"="cinema"](around:${radiusMeters},${lat},${lon});
+  relation["amenity"="cinema"](around:${radiusMeters},${lat},${lon});
+);
+out center tags;
+  `.trim();
 
-  // ENTWEDER ll ODER location
-  if (lat != null && lon != null) url.searchParams.set("ll", `@${lat},${lon},12z`);
-  else url.searchParams.set("location", `${city}, Germany`);
+  const r = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: "data=" + encodeURIComponent(query),
+  });
 
-  const r = await fetch(url.toString());
+  if (!r.ok) return { ok: false, status: r.status, data: null };
   const data = await r.json().catch(() => null);
-
-  if (!r.ok) return { ok: false, status: r.status, data };
-  if (data?.error) return { ok: false, status: 500, data };
   return { ok: true, status: 200, data };
 }
 
-// --------------------
-// SerpApi: Showtimes (Google Search -> showtimes block)
-// --------------------
-async function serpApiShowtimes({ cinemaName, city }) {
-  if (!SERPAPI_KEY) return { ok: false, status: 500, data: { error: "SERPAPI_KEY fehlt" } };
+function osmAddressFromTags(tags) {
+  const t = tags || {};
+  const parts = [];
 
-  const url = new URL("https://serpapi.com/search.json");
-  url.searchParams.set("engine", "google");
-  url.searchParams.set("q", `${cinemaName} Spielzeiten ${city}`);
-  url.searchParams.set("location", `${city}, Germany`);
-  url.searchParams.set("hl", "de");
-  url.searchParams.set("gl", "de");
-  url.searchParams.set("google_domain", "google.de");
-  url.searchParams.set("api_key", SERPAPI_KEY);
+  const street = [t["addr:street"], t["addr:housenumber"]].filter(Boolean).join(" ");
+  const cityLine = [t["addr:postcode"], t["addr:city"]].filter(Boolean).join(" ");
 
-  const r = await fetch(url.toString());
-  const data = await r.json().catch(() => null);
+  if (street) parts.push(street);
+  if (cityLine) parts.push(cityLine);
 
-  if (!r.ok) return { ok: false, status: r.status, data };
-  if (data?.error) return { ok: false, status: 500, data };
-  return { ok: true, status: 200, data };
-}
-
-// --------------------
-// Showtimes Normalization + 7 Tage
-// --------------------
-function normalizeShowtimes(showtimesArr) {
-  const out = [];
-
-  const days = Array.isArray(showtimesArr) ? showtimesArr : [];
-
-  for (let idx = 0; idx < days.length; idx++) {
-    const entry = days[idx] || {};
-
-    // Wir bauen Datum per Index (Heute + idx), weil entry.date bei dir fehlt
-    const dateObj = new Date();
-    dateObj.setDate(dateObj.getDate() + idx);
-
-    const day = dateObj.toLocaleDateString("de-DE", { weekday: "short" });
-    const date = dateObj.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
-
-    const moviesArr = Array.isArray(entry.movies) ? entry.movies : [];
-
-    const movies = moviesArr.map((m) => {
-      // ✅ Zeiten kommen bei dir über m.showing[]
-      let times = [];
-      if (Array.isArray(m.showing)) {
-        times = m.showing.map((s) => s?.time).filter(Boolean);
-      } else if (Array.isArray(m.times)) {
-        // falls SerpApi mal anders liefert
-        times = m.times
-          .map((t) => (typeof t === "string" ? t : t?.time))
-          .filter(Boolean);
-      }
-
-      return {
-        title: m?.name || "Film",
-        times,
-        poster: null,
-        info: { description: null, runtime: null, genres: [], cast: [] },
-      };
-    });
-
-    out.push({ day, date, movies });
-    if (out.length >= 7) break;
+  // Fallback: wenn nix da, versuch "address" / "contact:street" etc.
+  if (!parts.length) {
+    const alt = [t["contact:street"], t["contact:housenumber"]].filter(Boolean).join(" ");
+    const altCity = [t["contact:postcode"], t["contact:city"]].filter(Boolean).join(" ");
+    if (alt) parts.push(alt);
+    if (altCity) parts.push(altCity);
   }
 
-  return out;
+  return parts.join(", ");
 }
 
+function osmWebsiteFromTags(tags) {
+  const t = tags || {};
+  return (
+    t.website ||
+    t.url ||
+    t["contact:website"] ||
+    t["contact:url"] ||
+    null
+  );
+}
+
+function normalizeCinemaOSM(el) {
+  const tags = el?.tags || {};
+  const title = tags.name || tags["name:de"] || "Kino";
+
+  const lat = el.lat ?? el.center?.lat ?? null;
+  const lon = el.lon ?? el.center?.lon ?? null;
+
+  const link = osmWebsiteFromTags(tags);
+  const address = osmAddressFromTags(tags);
+
+  const id = `${el.type || "osm"}_${el.id || ""}`;
+
+  return {
+    title,
+    address,
+    rating: null,          // OSM hat i.d.R. kein Rating
+    reviews: null,
+    place_id: id,
+    link,
+    gps_coordinates: (lat != null && lon != null) ? { latitude: lat, longitude: lon } : null,
+    category: "amenity=cinema",
+    type: "Kino",
+  };
+}
+
+// kleine Cache-Entlastung (Overpass ist rate-limited)
+const cinemaCache = new Map(); // key -> {t, v}
+const CINEMA_CACHE_MS = 1000 * 60 * 10; // 10 Minuten
+
+function cacheGetCinema(key) {
+  const e = cinemaCache.get(key);
+  if (!e) return null;
+  if (Date.now() - e.t > CINEMA_CACHE_MS) {
+    cinemaCache.delete(key);
+    return null;
+  }
+  return e.v;
+}
+function cacheSetCinema(key, v) {
+  cinemaCache.set(key, { t: Date.now(), v });
+}
+
+// --------------------
+// Showtimes Helpers
+// --------------------
 function ensureSevenDays(days) {
   const now = new Date();
   const want = [];
@@ -307,119 +226,8 @@ function countRealDays(daysArr) {
   ).length;
 }
 
-function mergeDays(baseDays, extraDays) {
-  // merge by date label, not by index
-  const map = new Map();
-
-  for (const d of baseDays || []) {
-    const key = escStr(d?.date).trim();
-    if (!key) continue;
-    map.set(key, {
-      day: d.day || "",
-      date: d.date || "",
-      movies: Array.isArray(d.movies) ? [...d.movies] : [],
-    });
-  }
-
-  for (const d of extraDays || []) {
-    const key = escStr(d?.date).trim();
-    if (!key) continue;
-
-    const existing = map.get(key);
-    if (!existing) {
-      map.set(key, {
-        day: d.day || "",
-        date: d.date || "",
-        movies: Array.isArray(d.movies) ? [...d.movies] : [],
-      });
-      continue;
-    }
-
-    // merge movies by title
-    const movieMap = new Map();
-    for (const m of existing.movies || []) {
-      const t = escStr(m?.title).trim().toLowerCase();
-      if (t) movieMap.set(t, m);
-    }
-    for (const m of d.movies || []) {
-      const t = escStr(m?.title).trim();
-      if (!t) continue;
-      const k = t.toLowerCase();
-
-      if (!movieMap.has(k)) movieMap.set(k, m);
-      else {
-        const old = movieMap.get(k);
-        const times = [
-          ...new Set([...(old.times || []), ...(m.times || [])].filter(Boolean)),
-        ];
-        old.times = times;
-        if (!old.poster && m.poster) old.poster = m.poster;
-        old.info = old.info || m.info || old.info;
-      }
-    }
-
-    existing.movies = Array.from(movieMap.values());
-  }
-
-  return Array.from(map.values());
-}
-
 // --------------------
-// Cinedom Scraper (einfach & robust)
-// --------------------
-async function scrapeCinedom() {
-  try {
-    const r = await fetch("https://cinedom.de/programmuebersicht/", {
-      headers: { "User-Agent": "Mozilla/5.0" },
-    });
-    if (!r.ok) return [];
-    const html = await r.text();
-
-    // Achtung: Cinedom Seite ändert sich evtl. – hier “best effort”
-    const dayRegex = /data-date="([^"]+)"/g;
-    const timeRegex = /\b\d{2}:\d{2}\b/g;
-
-    const days = [];
-    let m;
-    while ((m = dayRegex.exec(html)) !== null && days.length < 7) {
-      const dateRaw = m[1]; // oft ISO-like
-      const dateObj = new Date(dateRaw);
-      const day = Number.isNaN(dateObj.getTime())
-        ? ""
-        : dateObj.toLocaleDateString("de-DE", { weekday: "short" });
-      const date = Number.isNaN(dateObj.getTime())
-        ? escStr(dateRaw).slice(0, 10)
-        : dateObj.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
-
-      // als fallback: sammle Zeiten global (nicht perfekt, aber besser als leer)
-      const times = [...html.matchAll(timeRegex)].map((x) => x[0]);
-      const uniqTimes = [...new Set(times)].slice(0, 25);
-
-      days.push({
-        day,
-        date,
-        movies: uniqTimes.length
-          ? [
-              {
-                title: "Film",
-                times: uniqTimes,
-                poster: null,
-                info: { description: null, runtime: null, genres: [], cast: [] },
-              },
-            ]
-          : [],
-      });
-    }
-
-    return days;
-  } catch (e) {
-    console.log("Cinedom Scrape Fehler:", e?.message || e);
-    return [];
-  }
-}
-
-// --------------------
-// TMDB
+// TMDB (bleibt wie bei dir)
 // --------------------
 function cleanMovieTitle(t) {
   return escStr(t)
@@ -510,10 +318,13 @@ function tmdbCacheKey(title) {
 // --------------------
 app.get("/api/cinemas", async (req, res) => {
   try {
-    if (!SERPAPI_KEY) return res.status(500).json({ ok: false, error: "SERPAPI_KEY fehlt" });
-
     const q = (req.query.q || "").toString().trim();
     if (!q) return res.status(400).json({ ok: false, error: "q fehlt" });
+
+    // Cache pro Query (klein geschrieben)
+    const cacheKey = q.toLowerCase();
+    const cached = cacheGetCinema(cacheKey);
+    if (cached) return res.json(cached);
 
     const geo = await nominatimSearch(q);
     if (!geo.length) return res.status(404).json({ ok: false, error: "Ort nicht gefunden" });
@@ -521,75 +332,70 @@ app.get("/api/cinemas", async (req, res) => {
     const city = pickCity(geo[0], q);
     const lat = toNumber(geo[0].lat);
     const lon = toNumber(geo[0].lon);
+    if (lat == null || lon == null) return res.status(500).json({ ok: false, error: "Koordinaten fehlen" });
 
-    const result = await serpApiGoogleMaps({ city, lat, lon });
+    const result = await overpassCinemas({ lat, lon, radiusMeters: 15000 });
     if (!result.ok)
-      return res.status(result.status).json({ ok: false, error: "SerpApi Fehler", details: result.data });
+      return res.status(result.status).json({ ok: false, error: "Overpass Fehler", details: result.data });
 
-    const raw = result.data?.local_results || result.data?.place_results || result.data?.places || [];
-    const cinemas = raw.filter(isCinemaPlace).map(normalizeCinema).filter((c) => c?.title && !isBlockedTitle(c.title));
+    const els = result.data?.elements || [];
+    const cinemas = els
+      .map(normalizeCinemaOSM)
+      .filter((c) => c?.title && !isBlockedTitle(c.title));
 
-    return res.json({
+    const payload = {
       ok: true,
       resolved_city: city,
-      coords_used: lat != null && lon != null ? { lat, lon } : null,
+      coords_used: { lat, lon },
       cinemas,
-    });
+    };
+
+    cacheSetCinema(cacheKey, payload);
+    return res.json(payload);
   } catch (e) {
     return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
 });
 
 // --------------------
-// GET /api/showtimes?name=...&city=...
+// GET /api/showtimes?name=...&city=...&url=...
+// (ohne SerpApi: wir holen Spielzeiten nur von der echten Kinoseite)
 // --------------------
 app.get("/api/showtimes", async (req, res) => {
   try {
-    if (!SERPAPI_KEY) return res.status(500).json({ ok: false, error: "SERPAPI_KEY fehlt" });
-
     const name = (req.query.name || "").toString().trim();
     const city = (req.query.city || "").toString().trim();
+    const url = (req.query.url || "").toString().trim();
+
     if (!name) return res.status(400).json({ ok: false, error: "name fehlt" });
     if (!city) return res.status(400).json({ ok: false, error: "city fehlt" });
     if (isBlockedTitle(name)) return res.status(400).json({ ok: false, error: "Dieses Kino ist blockiert." });
 
-    // 1) SerpApi showtimes
-    const result = await serpApiShowtimes({ cinemaName: name, city });
-    if (!result.ok)
-      return res.status(result.status).json({ ok: false, error: "SerpApi Fehler", details: result.data });
-
-    const showtimesArr = result.data?.showtimes || [];
-    const debugSample = showtimesArr?.[0] || null;
-    let days = normalizeShowtimes(showtimesArr);
-    let realDays = countRealDays(days);
-
-    // 2) Fallback: Cinedom scrape (nur wenn nicht genug echte Tage)
-    if (realDays < 2 && name.toLowerCase().includes("cinedom")) {
-      const scraped = await scrapeCinedom();
-      if (Array.isArray(scraped) && scraped.length) {
-        days = mergeDays(days, scraped);
-        realDays = countRealDays(days);
-      }
+    if (!url || !/^https?:\/\//i.test(url)) {
+      // Ohne Website können wir nichts scrapen
+      return res.json({
+        ok: false,
+        cinema: name,
+        city,
+        days: ensureSevenDays([]),
+        real_days_found: 0,
+        error: "Keine Website-URL für dieses Kino vorhanden.",
+      });
     }
-// 2b) Fallback: Playwright (echte Kinoseite), wenn immer noch zu wenig echte Zeiten
-if (realDays < 2) {
-  try {
-    // Erwartung: getShowtimesFromWebsite gibt Array von days zurück:
-    // [{ day:"Mi", date:"04.02.", movies:[{title,times,...}] }, ...]
-    const pwDays = await getShowtimesFromWebsite({ cinemaName: name, city });
 
-    if (Array.isArray(pwDays) && pwDays.length) {
-      days = mergeDays(days, pwDays);
-      realDays = countRealDays(days);
+    let days = [];
+    try {
+      const pwDays = await getShowtimesFromWebsite(url);
+      if (Array.isArray(pwDays)) days = pwDays;
+    } catch (e) {
+      console.log("Playwright Fehler:", e?.message || e);
+      days = [];
     }
-  } catch (e) {
-    console.log("Playwright Fehler:", e?.message || e);
-  }
-}
-    // 3) Immer am Ende auf 7 Tage auffüllen
+
     days = ensureSevenDays(days);
+    const realDays = countRealDays(days);
 
-    // 4) Optional TMDB enrich
+    // Optional TMDB enrich
     if (TMDB_KEY) {
       const MAX_ENRICH = 12;
       const uniqTitles = [];
@@ -640,10 +446,9 @@ if (realDays < 2) {
       ok: true,
       cinema: name,
       city,
+      url,
       days,
-      raw_has_showtimes: Array.isArray(showtimesArr) && showtimesArr.length > 0,
       real_days_found: realDays,
-      debug_sample: debugSample,
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
