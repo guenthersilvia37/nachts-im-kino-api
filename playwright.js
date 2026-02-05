@@ -19,10 +19,12 @@ export async function getShowtimesFromWebsite(url) {
     page.setDefaultNavigationTimeout(30000);
     page.setDefaultTimeout(30000);
 
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: 30000,
-    });
+    await Promise.race([
+  page.goto(url, { waitUntil: "domcontentloaded" }),
+  new Promise((_, reject) =>
+    setTimeout(() => reject(new Error("Timeout beim Laden der Seite")), 15000)
+  )
+]);
 
     await page.waitForTimeout(2500);
 
