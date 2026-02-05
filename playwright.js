@@ -16,7 +16,6 @@ export async function getShowtimesFromWebsite(url) {
 
     const page = await browser.newPage();
 
-    // ⛔ HARTE TIMEOUT-GRENZEN
     page.setDefaultNavigationTimeout(15000);
     page.setDefaultTimeout(15000);
 
@@ -25,10 +24,8 @@ export async function getShowtimesFromWebsite(url) {
       timeout: 15000
     });
 
-    // Nur kurz warten
     await page.waitForTimeout(2000);
 
-    // ⛏️ Extrem simples Scraping (nur Uhrzeiten)
     const times = await page.evaluate(() => {
       return Array.from(document.querySelectorAll("body *"))
         .map(el => el.textContent?.trim())
@@ -40,21 +37,26 @@ export async function getShowtimesFromWebsite(url) {
       return [];
     }
 
-    // 👉 Minimal gültiges Format für dein Frontend
     const today = new Date();
-    return [{
-      day: today.toLocaleDateString("de-DE", { weekday: "short" }),
-      date: today.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" }),
-      movies: [{
-        title: "Programm",
-        times
-      }]
-    };
 
+    return [
+      {
+        day: today.toLocaleDateString("de-DE", { weekday: "short" }),
+        date: today.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" }),
+        movies: [
+          {
+            title: "Programm",
+            times
+          }
+        ]
+      }
+    ];
   } catch (e) {
     console.log("Playwright scrape failed:", e.message);
     return [];
   } finally {
-    if (browser) await browser.close().catch(() => {});
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
   }
 }
