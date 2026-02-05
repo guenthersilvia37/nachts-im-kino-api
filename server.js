@@ -357,13 +357,20 @@ app.get("/api/showtimes", async (req, res) => {
     }
 
     let days = [];
-    try {
-      const pwDays = await getShowtimesFromWebsite(url);
-      if (Array.isArray(pwDays)) days = pwDays;
-    } catch (e) {
-      console.log("Playwright Fehler:", e?.message || e);
-      days = [];
-    }
+let pwDebug = null;
+
+try {
+  const pw = await getShowtimesFromWebsite(url);
+
+  // neue playwright.js liefert { days, debug }
+  if (pw && Array.isArray(pw.days)) days = pw.days;
+  pwDebug = pw?.debug || null;
+
+} catch (e) {
+  console.log("Playwright Fehler:", e?.message || e);
+  days = [];
+  pwDebug = { error: String(e?.message || e) };
+}
 
     days = ensureSevenDays(days);
     const realDays = countRealDays(days);
@@ -424,7 +431,15 @@ app.get("/api/showtimes", async (req, res) => {
       }
     }
 
-    return res.json({ ok: true, cinema: name, city, url, days, real_days_found: realDays });
+    return res.json({
+  ok: true,
+  cinema: name,
+  city,
+  url,
+  days,
+  real_days_found: realDays,
+  debug: pwDebug,
+});
   } catch (e) {
     return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
