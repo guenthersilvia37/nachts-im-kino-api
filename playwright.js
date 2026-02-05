@@ -1,32 +1,60 @@
 import { chromium } from "playwright";
 
 export async function getShowtimesFromWebsite(url) {
-  const browser = await chromium.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-  });
+  let browser;
 
-  const page = await browser.newPage();
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu"
+      ]
+    });
 
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-  await page.waitForTimeout(4000);
+    const page = await browser.newPage();
 
-  const times = await page.evaluate(() => {
-    const all = Array.from(document.querySelectorAll("*"))
-      .map((el) => (el.textContent || "").trim())
-      .filter(Boolean);
+    // ⛔ HARTE TIMEOUT-GRENZEN
+    page.setDefaultNavigationTimeout(15000);
+    page.setDefaultTimeout(15000);
 
-    const matches = all.filter((t) => /^\d{1,2}:\d{2}$/.test(t));
-    return Array.from(new Set(matches));
-  });
+    await page.goto(url, {
+      waitUntil: "domcontentloaded",
+      timeout: 15000
+    });
 
-  // ✅ WICHTIG: Log für Debug in Fly.io
-  console.log("[PLAYWRIGHT] URL:", url);
-  console.log("[PLAYWRIGHT] times_found:", times.length);
-  console.log("[PLAYWRIGHT] sample:", times.slice(0, 20));
+    // Nur kurz warten
+    await page.waitForTimeout(2000);
 
-  await browser.close();
+    // ⛏️ Extrem simples Scraping (nur Uhrzeiten)
+    const times = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll("body *"))
+        .map(el => el.textContent?.trim())
+        .filter(t => /^\d{1,2}:\d{2}$/.test(t))
+        .slice(0, 40);
+    });
 
-  // (noch) nur Zeiten zurückgeben – später bauen wir daraus days/movies
-  return times;
+    if (!times.length) {
+      return [];
+    }
+
+    // 👉 Minimal gültiges Format für dein Frontend
+    const today = new Date();
+    return [{
+      day: today.toLocaleDateString("de-DE", { weekday: "short" }),
+      date: today.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" }),
+      movies: [{
+        title: "Programm",
+        times
+      }]
+    };
+
+  } catch (e) {
+    console.log("Playwright scrape failed:", e.message);
+    return [];
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+  }
 }
