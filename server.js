@@ -1,7 +1,7 @@
 // server.js (Overpass + Playwright, SerpApi komplett raus)
 import express from "express";
 import dotenv from "dotenv";
-import { getShowtimesFromWebsite } from "./playwright.js";
+
 
 if (process.env.NODE_ENV !== "production") dotenv.config();
 
@@ -359,19 +359,8 @@ app.get("/api/showtimes", async (req, res) => {
     let days = [];
 let pwDebug = null;
 
-try {
-  const pw = await getShowtimesFromWebsite(url);
-
-  // falls playwright.js nur Array zurückgibt
-  if (Array.isArray(pw)) days = pw;
-
-  // falls playwright.js { days, debug } zurückgibt
-  if (pw && Array.isArray(pw.days)) days = pw.days;
-
-  pwDebug = pw?.debug || null;
-} catch (e) {
-  pwDebug = { error: String(e?.message || e) };
-}
+let days = [];
+let pwDebug = { note: "Playwright deaktiviert" };
 
     days = ensureSevenDays(days);
     const realDays = countRealDays(days);
