@@ -356,11 +356,8 @@ app.get("/api/showtimes", async (req, res) => {
       });
     }
 
-    days = [];
+    let days = [];
 let pwDebug = null;
-
-let days = [];
-let pwDebug = { note: "Playwright deaktiviert" };
 
     days = ensureSevenDays(days);
     const realDays = countRealDays(days);
