@@ -417,15 +417,7 @@ return res.json({
       }
     }
 
-    return res.json({
-  ok: true,
-  cinema: name,
-  city,
-  url,
-  days,
-  real_days_found: realDays,
-  debug: pwDebug,
-});
+    
   } catch (e) {
     return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
