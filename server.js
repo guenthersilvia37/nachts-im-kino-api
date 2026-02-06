@@ -356,7 +356,7 @@ app.get("/api/showtimes", async (req, res) => {
       });
     }
 
-    let days = [];
+    days = [];
 let pwDebug = null;
 
 let days = [];
