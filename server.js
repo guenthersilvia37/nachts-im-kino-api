@@ -1,7 +1,6 @@
-// server.js (Overpass + Playwright, SerpApi komplett raus)
+// server.js (Overpass + TMDB, Playwright aktuell deaktiviert)
 import express from "express";
 import dotenv from "dotenv";
-
 
 if (process.env.NODE_ENV !== "production") dotenv.config();
 
@@ -10,8 +9,8 @@ const app = express();
 const TMDB_KEY = (process.env.TMDB_KEY || "").trim();
 const PORT = Number(process.env.PORT) || 3000;
 
-// Wichtig für Nominatim/Overpass: vernünftiger User-Agent + Kontakt
-const UA = "nachts-im-kino/1.0 (contact: you@example.com)";
+// Wichtig für Nominatim/Overpass: identifizierbarer User-Agent + Kontakt
+const UA = "nachts-im-kino/1.0 (contact: guenther_silvia@web.de)";
 
 process.on("unhandledRejection", (err) => console.error("unhandledRejection:", err));
 process.on("uncaughtException", (err) => console.error("uncaughtException:", err));
@@ -38,13 +37,23 @@ app.get("/api/health", (req, res) =>
 // --------------------
 // Utils
 // --------------------
-function escStr(v) { return String(v ?? ""); }
-function toNumber(v) { const n = Number(v); return Number.isFinite(n) ? n : null; }
+function escStr(v) {
+  return String(v ?? "");
+}
+function toNumber(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
 function pickCity(geoItem, fallback) {
   const a = geoItem?.address || {};
   return (
-    a.city || a.town || a.village || a.municipality || a.county ||
-    geoItem?.display_name?.split(",")?.[0] || fallback
+    a.city ||
+    a.town ||
+    a.village ||
+    a.municipality ||
+    a.county ||
+    geoItem?.display_name?.split(",")?.[0] ||
+    fallback
   );
 }
 
@@ -52,10 +61,29 @@ function pickCity(geoItem, fallback) {
 // Blocklist
 // --------------------
 const BLOCKED_WORDS = [
-  "erotik","sex","sexy","adult","porno","porn","blue movie","fkk","bordell","strip","peepshow",
-  "escort","privatclub","sauna club","sauna","massage","erdbeermund","kino hole","hole kino",
-  "sexkino","adult kino",
+  "erotik",
+  "sex",
+  "sexy",
+  "adult",
+  "porno",
+  "porn",
+  "blue movie",
+  "fkk",
+  "bordell",
+  "strip",
+  "peepshow",
+  "escort",
+  "privatclub",
+  "sauna club",
+  "sauna",
+  "massage",
+  "erdbeermund",
+  "kino hole",
+  "hole kino",
+  "sexkino",
+  "adult kino",
 ];
+
 function isBlockedTitle(title) {
   const t = escStr(title).toLowerCase();
   return BLOCKED_WORDS.some((w) => t.includes(w));
@@ -71,8 +99,7 @@ async function nominatimSearch(q) {
 
   const r = await fetch(url, {
     headers: {
-      // wichtig: Nominatim will eine identifizierbare Anfrage
-      "User-Agent": "nachts-im-kino/1.0 (contact: guenther_silvia@web.de)",
+      "User-Agent": UA,
       "Accept-Language": "de",
       "From": "guenther_silvia@web.de",
     },
@@ -120,8 +147,10 @@ out center tags;
 function osmAddressFromTags(tags) {
   const t = tags || {};
   const parts = [];
+
   const street = [t["addr:street"], t["addr:housenumber"]].filter(Boolean).join(" ");
   const cityLine = [t["addr:postcode"], t["addr:city"]].filter(Boolean).join(" ");
+
   if (street) parts.push(street);
   if (cityLine) parts.push(cityLine);
 
@@ -131,6 +160,7 @@ function osmAddressFromTags(tags) {
     if (alt) parts.push(alt);
     if (altCity) parts.push(altCity);
   }
+
   return parts.join(", ");
 }
 
@@ -153,14 +183,14 @@ function normalizeCinemaOSM(el) {
     reviews: null,
     place_id: `${el.type || "osm"}_${el.id || ""}`,
     link: osmWebsiteFromTags(tags),
-    gps_coordinates: (lat != null && lon != null) ? { latitude: lat, longitude: lon } : null,
+    gps_coordinates: lat != null && lon != null ? { latitude: lat, longitude: lon } : null,
     category: "amenity=cinema",
     type: "Kino",
   };
 }
 
-// Cache Overpass
-const cinemaCache = new Map();
+// Cache Overpass (rate-limit freundlich)
+const cinemaCache = new Map(); // key -> {t,v}
 const CINEMA_CACHE_MS = 1000 * 60 * 10;
 
 function cacheGetCinema(key) {
@@ -172,7 +202,9 @@ function cacheGetCinema(key) {
   }
   return e.v;
 }
-function cacheSetCinema(key, v) { cinemaCache.set(key, { t: Date.now(), v }); }
+function cacheSetCinema(key, v) {
+  cinemaCache.set(key, { t: Date.now(), v });
+}
 
 // --------------------
 // Showtimes helpers
@@ -207,16 +239,8 @@ function ensureSevenDays(days) {
   });
 }
 
-function countRealDays(daysArr) {
-  return (daysArr || []).filter(
-    (d) =>
-      Array.isArray(d.movies) &&
-      d.movies.some((m) => Array.isArray(m.times) && m.times.length > 0)
-  ).length;
-}
-
 // --------------------
-// TMDB (wie bei dir)
+// TMDB
 // --------------------
 function cleanMovieTitle(t) {
   return escStr(t)
@@ -229,6 +253,7 @@ function cleanMovieTitle(t) {
 
 async function tmdbFetch(path, params = {}) {
   if (!TMDB_KEY) return null;
+
   const url = new URL(`https://api.themoviedb.org/3/${path}`);
   url.searchParams.set("api_key", TMDB_KEY);
   url.searchParams.set("language", "de-DE");
@@ -241,9 +266,11 @@ async function tmdbFetch(path, params = {}) {
 
 async function tmdbSearchBestMatch(rawTitle) {
   if (!TMDB_KEY) return null;
+
   const variants = [];
   const a = escStr(rawTitle).trim();
   const b = cleanMovieTitle(a);
+
   if (a) variants.push(a);
   if (b && b !== a) variants.push(b);
   if (b.includes(":")) variants.push(b.split(":")[0].trim());
@@ -279,7 +306,8 @@ async function tmdbMovieByTitle(title) {
   };
 }
 
-const memCache = new Map();
+// Cache TMDB
+const memCache = new Map(); // key -> {t,v}
 const CACHE_TTL_MS = 1000 * 60 * 60 * 12;
 
 function cacheGet(key) {
@@ -291,11 +319,15 @@ function cacheGet(key) {
   }
   return e.v;
 }
-function cacheSet(key, v) { if (v) memCache.set(key, { t: Date.now(), v }); }
-function tmdbCacheKey(title) { return `tmdb::${cleanMovieTitle(title)}`.toLowerCase(); }
+function cacheSet(key, v) {
+  if (v) memCache.set(key, { t: Date.now(), v });
+}
+function tmdbCacheKey(title) {
+  return `tmdb::${cleanMovieTitle(title)}`.toLowerCase();
+}
 
 // --------------------
-// GET /api/cinemas
+// GET /api/cinemas?q=...
 // --------------------
 app.get("/api/cinemas", async (req, res) => {
   try {
@@ -312,16 +344,17 @@ app.get("/api/cinemas", async (req, res) => {
     const city = pickCity(geo[0], q);
     const lat = toNumber(geo[0].lat);
     const lon = toNumber(geo[0].lon);
-    if (lat == null || lon == null) return res.status(500).json({ ok: false, error: "Koordinaten fehlen" });
+    if (lat == null || lon == null) {
+      return res.status(500).json({ ok: false, error: "Koordinaten fehlen" });
+    }
 
     const result = await overpassCinemas({ lat, lon, radiusMeters: 15000 });
-    if (!result.ok)
+    if (!result.ok) {
       return res.status(result.status).json({ ok: false, error: "Overpass Fehler", details: result.data });
+    }
 
     const els = result.data?.elements || [];
-    const cinemas = els
-      .map(normalizeCinemaOSM)
-      .filter((c) => c?.title && !isBlockedTitle(c.title));
+    const cinemas = els.map(normalizeCinemaOSM).filter((c) => c?.title && !isBlockedTitle(c.title));
 
     const payload = { ok: true, resolved_city: city, coords_used: { lat, lon }, cinemas };
     cacheSetCinema(cacheKey, payload);
@@ -332,7 +365,8 @@ app.get("/api/cinemas", async (req, res) => {
 });
 
 // --------------------
-// GET /api/showtimes
+// GET /api/showtimes?name=...&city=...&url=...
+// Playwright ist aktuell deaktiviert, aber Endpoint bleibt stabil.
 // --------------------
 app.get("/api/showtimes", async (req, res) => {
   try {
@@ -342,7 +376,9 @@ app.get("/api/showtimes", async (req, res) => {
 
     if (!name) return res.status(400).json({ ok: false, error: "name fehlt" });
     if (!city) return res.status(400).json({ ok: false, error: "city fehlt" });
-    if (isBlockedTitle(name)) return res.status(400).json({ ok: false, error: "Dieses Kino ist blockiert." });
+    if (isBlockedTitle(name)) {
+      return res.status(400).json({ ok: false, error: "Dieses Kino ist blockiert." });
+    }
 
     if (!url || !/^https?:\/\//i.test(url)) {
       return res.json({
@@ -356,75 +392,26 @@ app.get("/api/showtimes", async (req, res) => {
       });
     }
 
-    // ⛔ Playwright komplett deaktiviert
-let days = [];
-let pwDebug = { note: "Playwright deaktiviert (Fly RAM Schutz)" };
+    const days = ensureSevenDays([]);
+    const pwDebug = { note: "Playwright deaktiviert (Fly RAM Schutz)" };
 
-days = ensureSevenDays(days);
-const realDays = countRealDays(days);
-
-return res.json({
-  ok: false,
-  cinema: name,
-  city,
-  url,
-  days,
-  real_days_found: 0,
-  error: "Spielzeiten derzeit nicht verfügbar.",
-  debug: pwDebug,
-});
-}
-    // Optional TMDB enrich
-    if (TMDB_KEY) {
-      const MAX_ENRICH = 12;
-      const uniqTitles = [];
-
-      for (const d of days) {
-        for (const m of d.movies || []) {
-          const t = (m.title || "").trim();
-          if (!t) continue;
-          if (isBlockedTitle(t)) continue;
-          if (!uniqTitles.includes(t)) uniqTitles.push(t);
-          if (uniqTitles.length >= MAX_ENRICH) break;
-        }
-        if (uniqTitles.length >= MAX_ENRICH) break;
-      }
-
-      const infoMap = new Map();
-      await Promise.all(
-        uniqTitles.map(async (t) => {
-          const ck = tmdbCacheKey(t);
-          const cached = cacheGet(ck);
-          if (cached) { infoMap.set(t, cached); return; }
-          const info = await tmdbMovieByTitle(t);
-          if (info) cacheSet(ck, info);
-          infoMap.set(t, info || null);
-        })
-      );
-
-      for (const d of days) {
-        for (const m of d.movies || []) {
-          const info = infoMap.get((m.title || "").trim());
-          if (!info) continue;
-          if (!m.poster && info.poster) m.poster = info.poster;
-          m.info = {
-            description: info.description || null,
-            runtime: info.runtime || null,
-            genres: info.genres || [],
-            cast: info.cast || [],
-          };
-        }
-      }
-    }
-
-    
+    return res.json({
+      ok: false,
+      cinema: name,
+      city,
+      url,
+      days,
+      real_days_found: 0,
+      error: "Spielzeiten derzeit nicht verfügbar.",
+      debug: pwDebug,
+    });
   } catch (e) {
     return res.status(500).json({ ok: false, error: "Serverfehler", details: String(e?.message || e) });
   }
 });
 
 // --------------------
-// /api/movie + /api/poster (wie gehabt)
+// GET /api/movie?title=...
 // --------------------
 app.get("/api/movie", async (req, res) => {
   try {
@@ -446,6 +433,9 @@ app.get("/api/movie", async (req, res) => {
   }
 });
 
+// --------------------
+// GET /api/poster?title=...
+// --------------------
 app.get("/api/poster", async (req, res) => {
   try {
     const title = (req.query.title || "").toString().trim();
